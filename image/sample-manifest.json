@@ -1,0 +1,24 @@
+{
+  "samples": [
+    {
+      "name": "DSC_2156.NEF",
+      "expectedBrand": "Nikon",
+      "expectedSourceFormat": "raw",
+      "requireModel": true,
+      "requireLens": true,
+      "requireIso": true,
+      "shouldRender": false,
+      "shouldAutoTune": false
+    },
+    {
+      "name": "20230813-0192.ARW",
+      "expectedBrand": "Sony",
+      "expectedSourceFormat": "raw",
+      "requireModel": true,
+      "requireLens": true,
+      "requireIso": true,
+      "shouldRender": false,
+      "shouldAutoTune": false
+    }
+  ]
+}
