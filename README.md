@@ -94,6 +94,17 @@ npm run desktop:build:windows
 npm run desktop:build:mac
 ```
 
+## 自动发布
+
+项目包含 GitHub Actions 发布流程。推送版本标签后，会自动构建 Windows 和 macOS 安装包，并生成 GitHub Release。
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+也可以在 GitHub 的 Actions 页面手动运行 `Release` 工作流，并填写版本号，例如 `v0.1.0`。
+
 ## 许可证
 
 请查看 [LICENSE](LICENSE)。
