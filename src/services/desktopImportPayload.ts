@@ -1,11 +1,11 @@
-import type { DiagnosticSampleFile } from "./desktopBridge";
+import type { DesktopPhotoFile } from "./desktopBridge";
 
 interface DesktopPayloadFileOptions {
   lastModified?: number;
 }
 
 export const desktopPhotoPayloadToFile = (
-  photo: DiagnosticSampleFile,
+  photo: DesktopPhotoFile,
   options: DesktopPayloadFileOptions = {}
 ): File => {
   if (!photo.dataBase64) throw new Error(`${photo.name} 读取结果为空`);

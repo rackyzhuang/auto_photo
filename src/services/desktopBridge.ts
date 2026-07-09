@@ -10,10 +10,8 @@ import type {
   ExportConflictStrategy,
   ExportJobHistory,
   ExportJobRecord,
-  KeyringDiagnosticReport,
   NamedProjectInfo,
   PhotoMetadata,
-  ProcessResourceSample,
   ProjectSnapshot,
   ProjectStoreSummary
 } from "../types";
@@ -60,7 +58,7 @@ export interface SavedExportResult {
   fileName: string;
 }
 
-export interface DiagnosticSampleFile {
+export interface DesktopPhotoFile {
   name: string;
   path: string;
   size: number;
@@ -69,9 +67,9 @@ export interface DiagnosticSampleFile {
   metadata?: PhotoMetadata;
 }
 
-export const readPhotoFiles = async (filePaths: string[]): Promise<DiagnosticSampleFile[]> => {
+export const readPhotoFiles = async (filePaths: string[]): Promise<DesktopPhotoFile[]> => {
   if (!isTauriRuntime() || filePaths.length === 0) return [];
-  return invoke<DiagnosticSampleFile[]>("read_photo_files", {
+  return invoke<DesktopPhotoFile[]>("read_photo_files", {
     filePaths
   });
 };
@@ -133,44 +131,6 @@ export const loadNamedProjectSnapshot = async (projectId: string): Promise<Proje
 export const getProjectStorePath = async (): Promise<string> => {
   const result = await invoke<{ path: string }>("get_project_store_info");
   return result.path;
-};
-
-export const createExportDiagnosticDirectory = async (): Promise<string> => {
-  const result = await invoke<{ path: string }>("create_export_diagnostic_dir");
-  return result.path;
-};
-
-export const getProcessResourceSample = async (): Promise<ProcessResourceSample | undefined> => {
-  if (!isTauriRuntime()) return undefined;
-  return invoke<ProcessResourceSample>("get_process_resource_sample");
-};
-
-export const runKeyringDiagnostic = async (): Promise<KeyringDiagnosticReport | undefined> => {
-  if (!isTauriRuntime()) return undefined;
-  return invoke<KeyringDiagnosticReport>("run_keyring_diagnostic");
-};
-
-export const saveDiagnosticReport = async (reportName: string, report: unknown): Promise<string | undefined> => {
-  if (!isTauriRuntime()) return undefined;
-  const result = await invoke<{ path: string }>("save_diagnostic_report", {
-    reportName,
-    report
-  });
-  return result.path;
-};
-
-export const readDiagnosticSampleFiles = async (sampleDir: string): Promise<DiagnosticSampleFile[]> => {
-  if (!isTauriRuntime()) return [];
-  return invoke<DiagnosticSampleFile[]>("read_diagnostic_sample_files", {
-    sampleDir
-  });
-};
-
-export const readDiagnosticSampleManifest = async (manifestPath: string): Promise<string | undefined> => {
-  if (!isTauriRuntime()) return undefined;
-  return invoke<string>("read_diagnostic_sample_manifest", {
-    manifestPath
-  });
 };
 
 export const getProjectStoreSummary = async (): Promise<ProjectStoreSummary> => {

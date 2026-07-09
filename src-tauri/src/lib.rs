@@ -2,8 +2,6 @@ use base64::{engine::general_purpose, Engine as _};
 use exif::{In, Reader, Tag, Value};
 use keyring::Entry;
 use rusqlite::{params, Connection};
-#[cfg(windows)]
-use std::ffi::c_void;
 use std::io::BufReader;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -14,8 +12,6 @@ use tauri::Manager;
 
 const AI_KEYRING_SERVICE: &str = "auto-photo";
 const AI_KEYRING_USER: &str = "openai-api-key";
-const DIAGNOSTIC_KEYRING_SERVICE: &str = "auto-photo-diagnostics";
-const DIAGNOSTIC_KEYRING_USER: &str = "keyring-smoke";
 const DEFAULT_AI_MODEL: &str = "gpt-5.5";
 const DEFAULT_AI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -49,39 +45,18 @@ struct ProjectStoreSummary {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProcessResourceSample {
-    pid: u32,
-    platform: String,
-    working_set_bytes: Option<u64>,
-    peak_working_set_bytes: Option<u64>,
-    private_memory_bytes: Option<u64>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct KeyringDiagnosticReport {
-    status: String,
-    write_succeeded: bool,
-    read_succeeded: bool,
-    delete_succeeded: bool,
-    missing_after_delete: bool,
-    ai_key_presence_unchanged: bool,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DiagnosticSampleFile {
+struct PhotoFilePayload {
     name: String,
     path: String,
     size: u64,
     mime_type: String,
     data_base64: String,
-    metadata: Option<DiagnosticSampleMetadata>,
+    metadata: Option<PhotoFileMetadata>,
 }
 
 #[derive(serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct DiagnosticSampleMetadata {
+struct PhotoFileMetadata {
     make: Option<String>,
     model: Option<String>,
     lens: Option<String>,
@@ -1619,180 +1594,7 @@ fn get_project_store_info(app: tauri::AppHandle) -> Result<ProjectStoreInfo, Str
     })
 }
 
-#[cfg(windows)]
-#[repr(C)]
-#[allow(non_snake_case)]
-struct ProcessMemoryCounters {
-    cb: u32,
-    PageFaultCount: u32,
-    PeakWorkingSetSize: usize,
-    WorkingSetSize: usize,
-    QuotaPeakPagedPoolUsage: usize,
-    QuotaPagedPoolUsage: usize,
-    QuotaPeakNonPagedPoolUsage: usize,
-    QuotaNonPagedPoolUsage: usize,
-    PagefileUsage: usize,
-    PeakPagefileUsage: usize,
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetCurrentProcess() -> *mut c_void;
-}
-
-#[cfg(windows)]
-#[link(name = "psapi")]
-extern "system" {
-    fn GetProcessMemoryInfo(
-        process: *mut c_void,
-        counters: *mut ProcessMemoryCounters,
-        size: u32,
-    ) -> i32;
-}
-
-#[cfg(windows)]
-fn read_process_resource_sample() -> Result<ProcessResourceSample, String> {
-    let mut counters = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
-        PageFaultCount: 0,
-        PeakWorkingSetSize: 0,
-        WorkingSetSize: 0,
-        QuotaPeakPagedPoolUsage: 0,
-        QuotaPagedPoolUsage: 0,
-        QuotaPeakNonPagedPoolUsage: 0,
-        QuotaNonPagedPoolUsage: 0,
-        PagefileUsage: 0,
-        PeakPagefileUsage: 0,
-    };
-
-    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
-    if ok == 0 {
-        return Err("无法读取当前桌面进程内存采样".to_string());
-    }
-
-    Ok(ProcessResourceSample {
-        pid: std::process::id(),
-        platform: std::env::consts::OS.to_string(),
-        working_set_bytes: Some(counters.WorkingSetSize as u64),
-        peak_working_set_bytes: Some(counters.PeakWorkingSetSize as u64),
-        private_memory_bytes: Some(counters.PagefileUsage as u64),
-    })
-}
-
-#[cfg(not(windows))]
-fn read_process_resource_sample() -> Result<ProcessResourceSample, String> {
-    Ok(ProcessResourceSample {
-        pid: std::process::id(),
-        platform: std::env::consts::OS.to_string(),
-        working_set_bytes: None,
-        peak_working_set_bytes: None,
-        private_memory_bytes: None,
-    })
-}
-
-#[tauri::command]
-fn get_process_resource_sample() -> Result<ProcessResourceSample, String> {
-    read_process_resource_sample()
-}
-
-#[tauri::command]
-fn run_keyring_diagnostic() -> Result<KeyringDiagnosticReport, String> {
-    if !cfg!(debug_assertions) {
-        return Err("钥匙串诊断仅在开发模式可用".to_string());
-    }
-
-    let ai_key_presence_before = has_ai_api_key();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("无法生成钥匙串诊断 ID：{error}"))?
-        .as_millis();
-    let test_value = format!("auto-photo-keyring-diagnostic-{now_ms}");
-    let entry = Entry::new(DIAGNOSTIC_KEYRING_SERVICE, DIAGNOSTIC_KEYRING_USER)
-        .map_err(|_| "系统钥匙串不可用，无法创建诊断条目".to_string())?;
-
-    let write_succeeded = entry.set_password(&test_value).is_ok();
-    let read_succeeded = write_succeeded
-        && entry
-            .get_password()
-            .map(|value| value == test_value)
-            .unwrap_or(false);
-    let delete_succeeded = if write_succeeded {
-        entry.delete_credential().is_ok()
-    } else {
-        false
-    };
-    let missing_after_delete = if delete_succeeded {
-        entry.get_password().is_err()
-    } else {
-        false
-    };
-    let ai_key_presence_after = has_ai_api_key();
-    let ai_key_presence_unchanged = ai_key_presence_before == ai_key_presence_after;
-    let passed = write_succeeded
-        && read_succeeded
-        && delete_succeeded
-        && missing_after_delete
-        && ai_key_presence_unchanged;
-
-    Ok(KeyringDiagnosticReport {
-        status: if passed { "passed" } else { "failed" }.to_string(),
-        write_succeeded,
-        read_succeeded,
-        delete_succeeded,
-        missing_after_delete,
-        ai_key_presence_unchanged,
-    })
-}
-
-fn sanitize_diagnostic_name(name: &str) -> String {
-    let sanitized = name
-        .chars()
-        .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
-            _ => '-',
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-
-    if sanitized.is_empty() {
-        "diagnostic".to_string()
-    } else {
-        sanitized
-    }
-}
-
-#[tauri::command]
-fn save_diagnostic_report(
-    app: tauri::AppHandle,
-    report_name: String,
-    report: serde_json::Value,
-) -> Result<ProjectStoreInfo, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("无法生成诊断报告 ID：{error}"))?
-        .as_millis();
-    let diagnostic_dir = app_data_dir.join("diagnostics");
-    fs::create_dir_all(&diagnostic_dir)
-        .map_err(|error| format!("无法创建诊断报告目录：{error}"))?;
-
-    let safe_name = sanitize_diagnostic_name(&report_name);
-    let report_path = diagnostic_dir.join(format!("{safe_name}-{now_ms}.json"));
-    let report_json = serde_json::to_string_pretty(&report)
-        .map_err(|error| format!("无法序列化诊断报告：{error}"))?;
-    fs::write(&report_path, report_json).map_err(|error| format!("无法写入诊断报告：{error}"))?;
-
-    Ok(ProjectStoreInfo {
-        path: report_path.to_string_lossy().to_string(),
-    })
-}
-
-fn diagnostic_sample_mime(extension: &str) -> Option<&'static str> {
+fn photo_mime(extension: &str) -> Option<&'static str> {
     match extension {
         "jpg" | "jpeg" => Some("image/jpeg"),
         "arw" => Some("image/x-sony-arw"),
@@ -1869,11 +1671,11 @@ fn exif_display(exif: &exif::Exif, tag: Tag) -> Option<String> {
     }
 }
 
-fn read_diagnostic_sample_metadata(path: &Path) -> Option<DiagnosticSampleMetadata> {
+fn read_photo_metadata(path: &Path) -> Option<PhotoFileMetadata> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let exif = Reader::new().read_from_container(&mut reader).ok()?;
-    let metadata = DiagnosticSampleMetadata {
+    let metadata = PhotoFileMetadata {
         make: exif_ascii(&exif, Tag::Make),
         model: exif_ascii(&exif, Tag::Model),
         lens: exif_ascii(&exif, Tag::LensModel),
@@ -1902,124 +1704,8 @@ fn read_diagnostic_sample_metadata(path: &Path) -> Option<DiagnosticSampleMetada
     }
 }
 
-fn collect_diagnostic_sample_paths(
-    dir: &Path,
-    paths: &mut Vec<PathBuf>,
-    max_files: usize,
-) -> Result<(), String> {
-    if paths.len() >= max_files {
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(dir)
-        .map_err(|error| format!("无法读取样张目录：{error}"))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        if paths.len() >= max_files {
-            break;
-        }
-
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("无法读取样张文件类型：{error}"))?;
-
-        if file_type.is_dir() {
-            collect_diagnostic_sample_paths(&path, paths, max_files)?;
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if diagnostic_sample_mime(&extension).is_some() {
-            paths.push(path);
-        }
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
-fn read_diagnostic_sample_files(sample_dir: String) -> Result<Vec<DiagnosticSampleFile>, String> {
-    const MAX_SAMPLE_FILES: usize = 40;
-    const MAX_SAMPLE_FILE_BYTES: u64 = 128 * 1024 * 1024;
-
-    let sample_dir = PathBuf::from(sample_dir);
-    if !sample_dir.exists() {
-        return Err(format!("样张目录不存在：{}", sample_dir.to_string_lossy()));
-    }
-    if !sample_dir.is_dir() {
-        return Err(format!(
-            "样张路径不是目录：{}",
-            sample_dir.to_string_lossy()
-        ));
-    }
-
-    let mut sample_paths = Vec::new();
-    collect_diagnostic_sample_paths(&sample_dir, &mut sample_paths, MAX_SAMPLE_FILES)?;
-
-    let mut samples = Vec::new();
-    for path in sample_paths {
-        if samples.len() >= MAX_SAMPLE_FILES {
-            break;
-        }
-
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let Some(mime_type) = diagnostic_sample_mime(&extension) else {
-            continue;
-        };
-
-        let file_metadata =
-            fs::metadata(&path).map_err(|error| format!("无法读取样张信息：{error}"))?;
-        if file_metadata.len() > MAX_SAMPLE_FILE_BYTES {
-            continue;
-        }
-
-        let data_base64 = if extension == "arw" || extension == "nef" {
-            String::new()
-        } else {
-            let bytes = fs::read(&path).map_err(|error| format!("无法读取样张文件：{error}"))?;
-            general_purpose::STANDARD.encode(bytes)
-        };
-        let metadata = if extension == "arw" || extension == "nef" {
-            read_diagnostic_sample_metadata(&path)
-        } else {
-            None
-        };
-
-        samples.push(DiagnosticSampleFile {
-            name: path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("sample")
-                .to_string(),
-            path: path.to_string_lossy().to_string(),
-            size: file_metadata.len(),
-            mime_type: mime_type.to_string(),
-            data_base64,
-            metadata,
-        });
-    }
-
-    Ok(samples)
-}
-
-#[tauri::command]
-fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<DiagnosticSampleFile>, String> {
+fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<PhotoFilePayload>, String> {
     const MAX_IMPORT_FILES: usize = 24;
     const MAX_IMPORT_FILE_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_IMPORT_TOTAL_BYTES: u64 = 384 * 1024 * 1024;
@@ -2047,7 +1733,7 @@ fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<DiagnosticSampleFile>
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let Some(mime_type) = diagnostic_sample_mime(&extension) else {
+        let Some(mime_type) = photo_mime(&extension) else {
             return Err(format!("不支持的格式：{}", path.to_string_lossy()));
         };
 
@@ -2066,12 +1752,12 @@ fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<DiagnosticSampleFile>
 
         let bytes = fs::read(&path).map_err(|error| format!("无法读取文件：{error}"))?;
         let metadata = if extension == "arw" || extension == "nef" {
-            read_diagnostic_sample_metadata(&path)
+            read_photo_metadata(&path)
         } else {
             None
         };
 
-        files.push(DiagnosticSampleFile {
+        files.push(PhotoFilePayload {
             name: path
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -2088,61 +1774,6 @@ fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<DiagnosticSampleFile>
     Ok(files)
 }
 
-#[tauri::command]
-fn read_diagnostic_sample_manifest(manifest_path: String) -> Result<String, String> {
-    const MAX_SAMPLE_MANIFEST_BYTES: u64 = 256 * 1024;
-
-    let manifest_path = PathBuf::from(manifest_path);
-    if !manifest_path.exists() {
-        return Err(format!(
-            "样张 manifest 不存在：{}",
-            manifest_path.to_string_lossy()
-        ));
-    }
-    if !manifest_path.is_file() {
-        return Err(format!(
-            "样张 manifest 路径不是文件：{}",
-            manifest_path.to_string_lossy()
-        ));
-    }
-    let extension = manifest_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if extension != "json" {
-        return Err("样张 manifest 必须是 JSON 文件".to_string());
-    }
-
-    let metadata = fs::metadata(&manifest_path)
-        .map_err(|error| format!("无法读取样张 manifest 信息：{error}"))?;
-    if metadata.len() > MAX_SAMPLE_MANIFEST_BYTES {
-        return Err("样张 manifest 超过 256 KB 上限".to_string());
-    }
-
-    fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("无法读取样张 manifest 文件：{error}"))
-}
-
-#[tauri::command]
-fn create_export_diagnostic_dir(app: tauri::AppHandle) -> Result<ProjectStoreInfo, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("无法生成导出诊断目录 ID：{error}"))?
-        .as_millis();
-    let diagnostic_dir = app_data_dir
-        .join("export-diagnostics")
-        .join(format!("run-{now_ms}"));
-    fs::create_dir_all(&diagnostic_dir)
-        .map_err(|error| format!("无法创建导出诊断目录：{error}"))?;
-    Ok(ProjectStoreInfo {
-        path: diagnostic_dir.to_string_lossy().to_string(),
-    })
-}
 
 #[tauri::command]
 fn record_export_job(
@@ -2291,19 +1922,13 @@ pub fn run() {
             load_named_project_snapshot,
             list_named_project_snapshots,
             get_project_store_info,
-            get_process_resource_sample,
-            save_diagnostic_report,
             read_photo_files,
-            read_diagnostic_sample_files,
-            read_diagnostic_sample_manifest,
-            create_export_diagnostic_dir,
             get_project_store_summary,
             record_export_job,
             list_export_jobs,
             get_ai_settings,
             save_ai_settings,
             diagnose_ai_connection,
-            run_keyring_diagnostic,
             tune_photo_with_openai
         ])
         .setup(|app| {
@@ -2323,126 +1948,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn process_resource_sample_reports_current_process() {
-        let sample =
-            read_process_resource_sample().expect("process resource sample should be available");
-        assert_eq!(sample.pid, std::process::id());
-        assert!(!sample.platform.is_empty());
-
-        #[cfg(windows)]
-        {
-            assert!(sample.working_set_bytes.unwrap_or(0) > 0);
-            assert!(
-                sample.peak_working_set_bytes.unwrap_or(0) >= sample.working_set_bytes.unwrap_or(0)
-            );
-        }
-    }
-
-    #[test]
-    fn diagnostic_sample_reader_recurses_into_brand_folders() {
-        let root = std::env::temp_dir().join(format!(
-            "auto-photo-sample-reader-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be valid")
-                .as_millis()
-        ));
-        let nikon_dir = root.join("nikon");
-        let sony_dir = root.join("sony");
-        fs::create_dir_all(&nikon_dir).expect("nikon temp dir should be created");
-        fs::create_dir_all(&sony_dir).expect("sony temp dir should be created");
-        fs::write(nikon_dir.join("sample.NEF"), [1_u8, 2, 3])
-            .expect("nikon sample should be written");
-        fs::write(sony_dir.join("sample.ARW"), [4_u8, 5, 6])
-            .expect("sony sample should be written");
-
-        let samples = read_diagnostic_sample_files(root.to_string_lossy().to_string())
-            .expect("recursive samples should be read");
-        let names = samples
-            .iter()
-            .map(|sample| sample.name.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(samples.len(), 2);
-        assert!(names.contains(&"sample.NEF"));
-        assert!(names.contains(&"sample.ARW"));
-        assert!(samples.iter().all(|sample| sample.data_base64.is_empty()));
-
-        fs::remove_dir_all(root).expect("temp sample dir should be removed");
-    }
-
-    #[test]
-    fn real_sample_dir_reads_raw_placeholders_when_configured() {
-        let Ok(sample_dir) = std::env::var("AUTO_PHOTO_REAL_SAMPLE_DIR") else {
-            return;
-        };
-
-        let samples =
-            read_diagnostic_sample_files(sample_dir).expect("real sample dir should be readable");
-        assert!(
-            samples
-                .iter()
-                .any(|sample| sample.mime_type == "image/x-nikon-nef"),
-            "expected at least one Nikon NEF sample"
-        );
-        assert!(
-            samples
-                .iter()
-                .any(|sample| sample.mime_type == "image/x-sony-arw"),
-            "expected at least one Sony ARW sample"
-        );
-        assert!(
-            samples
-                .iter()
-                .filter(|sample| sample.mime_type == "image/x-nikon-nef"
-                    || sample.mime_type == "image/x-sony-arw")
-                .all(|sample| sample.size > 0 && sample.data_base64.is_empty()),
-            "RAW samples should keep real file sizes while avoiding large base64 payloads"
-        );
-        assert!(
-            samples
-                .iter()
-                .filter(|sample| sample.mime_type == "image/x-nikon-nef"
-                    || sample.mime_type == "image/x-sony-arw")
-                .all(
-                    |sample| sample.metadata.as_ref().is_some_and(|metadata| metadata
-                        .model
-                        .is_some()
-                        && metadata.lens.is_some()
-                        && metadata.iso.is_some())
-                ),
-            "RAW samples should expose safe camera metadata without base64 payloads"
-        );
-    }
-
-    #[test]
-    fn diagnostic_sample_manifest_reads_small_json_files() {
-        let root = std::env::temp_dir().join(format!(
-            "auto-photo-sample-manifest-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be valid")
-                .as_millis()
-        ));
-        fs::create_dir_all(&root).expect("manifest temp dir should be created");
-        let manifest_path = root.join("samples.json");
-        fs::write(
-            &manifest_path,
-            r#"{"samples":[{"name":"sample.NEF","expectedBrand":"Nikon"}]}"#,
-        )
-        .expect("manifest should be written");
-
-        let manifest = read_diagnostic_sample_manifest(manifest_path.to_string_lossy().to_string())
-            .expect("manifest should be readable");
-
-        assert!(manifest.contains("sample.NEF"));
-        assert!(manifest.contains("Nikon"));
-
-        fs::remove_dir_all(root).expect("temp manifest dir should be removed");
-    }
-
     #[test]
     fn export_job_history_lists_latest_details() {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
@@ -2616,56 +2121,6 @@ mod tests {
 
         fs::remove_dir_all(root).expect("selected file temp dir should be removed");
     }
-
-    #[test]
-    fn real_photo_files_read_desktop_import_paths_when_configured() {
-        let Ok(paths) = std::env::var("AUTO_PHOTO_REAL_DESKTOP_IMPORT_PATHS") else {
-            return;
-        };
-        let file_paths = paths
-            .split(';')
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        if file_paths.is_empty() {
-            return;
-        }
-
-        let files = read_photo_files(file_paths.clone()).expect("real desktop import paths should read");
-        assert_eq!(files.len(), file_paths.len());
-        assert!(
-            files.iter().any(|file| file.mime_type == "image/jpeg"),
-            "expected at least one JPG sample"
-        );
-        assert!(
-            files.iter().any(|file| file.mime_type == "image/x-nikon-nef"),
-            "expected at least one Nikon NEF sample"
-        );
-        assert!(
-            files.iter().any(|file| file.mime_type == "image/x-sony-arw"),
-            "expected at least one Sony ARW sample"
-        );
-        assert!(
-            files
-                .iter()
-                .all(|file| file.size > 0 && !file.data_base64.is_empty()),
-            "desktop import path should return file payloads"
-        );
-        assert!(
-            files
-                .iter()
-                .filter(|file| file.mime_type == "image/x-nikon-nef"
-                    || file.mime_type == "image/x-sony-arw")
-                .all(|file| file.metadata.as_ref().is_some_and(|metadata| metadata
-                    .model
-                    .is_some()
-                    && metadata.lens.is_some()
-                    && metadata.iso.is_some())),
-            "RAW desktop import samples should expose safe camera metadata"
-        );
-    }
-
     #[test]
     fn read_photo_files_rejects_unsupported_formats() {
         let root = std::env::temp_dir().join(format!(

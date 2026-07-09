@@ -184,23 +184,6 @@ export interface ProjectStoreSummary {
   snapshot_updated_at?: string;
 }
 
-export interface ProcessResourceSample {
-  pid: number;
-  platform: string;
-  workingSetBytes?: number;
-  peakWorkingSetBytes?: number;
-  privateMemoryBytes?: number;
-}
-
-export interface KeyringDiagnosticReport {
-  status: "passed" | "failed";
-  writeSucceeded: boolean;
-  readSucceeded: boolean;
-  deleteSucceeded: boolean;
-  missingAfterDelete: boolean;
-  aiKeyPresenceUnchanged: boolean;
-}
-
 export interface NamedProjectInfo {
   projectId: string;
   name: string;

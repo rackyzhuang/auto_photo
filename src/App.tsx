@@ -471,10 +471,6 @@ interface AiPendingSuggestion {
 
 declare global {
   interface Window {
-    __AUTO_PHOTO_INJECT_AI_SETTINGS__?: (settings: AiSettingsState, editing?: boolean) => void;
-    __AUTO_PHOTO_INJECT_AI_CONNECTION_DIAGNOSTIC__?: (diagnostic: AiConnectionDiagnostic) => void;
-    __AUTO_PHOTO_INJECT_AI_SUGGESTION__?: (result: Partial<AiTuningResult>) => Promise<AiTuningResult | undefined>;
-    __AUTO_PHOTO_INJECT_EXPORT_HISTORY__?: (history: ExportJobHistory[]) => void;
     showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<FileSystemDirectoryHandle>;
   }
 }
@@ -927,95 +923,6 @@ export function App() {
       abortController.abort();
     };
   }, [selectedAsset, isCropEditing]);
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__AUTO_PHOTO_INJECT_AI_SETTINGS__ = (settings: AiSettingsState, editing?: boolean) => {
-      const nextSettings = {
-        ...settings,
-        baseUrl: sanitizeAiBaseUrlForDisplay(settings.baseUrl)
-      };
-      setAiSettings(nextSettings);
-      setAiModelDraft(nextSettings.model);
-      setAiBaseUrlDraft(nextSettings.baseUrl);
-      setAiApiKeyDraft("");
-      setIsAiConfigEditing(editing ?? !(nextSettings.hasApiKey && nextSettings.availableModels.length > 0));
-      setAiPanelMessage(
-        nextSettings.hasApiKey && nextSettings.availableModels.length > 0
-          ? `AI 设置已就绪，可用模型 ${nextSettings.availableModels.length} 个`
-          : "请先保存 API key 和 Base URL"
-      );
-    };
-    return () => {
-      if (window.__AUTO_PHOTO_INJECT_AI_SETTINGS__) {
-        delete window.__AUTO_PHOTO_INJECT_AI_SETTINGS__;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__AUTO_PHOTO_INJECT_AI_SUGGESTION__ = async (result: Partial<AiTuningResult>) => {
-      if (!selectedAsset || !selectedAssetAiCapable) return undefined;
-      const suggestion: AiTuningResult = {
-        model: result.model ?? "diagnostic-local",
-        summary: result.summary ?? "Local diagnostic AI candidate",
-        params: result.params ?? {
-          exposure: 12,
-          temperature: -6,
-          contrast: 8,
-          vibrance: 10
-        }
-      };
-      const params = normalizeAiSuggestionParams(selectedAsset.edits, suggestion);
-      const previewUrl = await renderAssetAiCandidatePreview(selectedAsset, params);
-      setAiPendingSuggestion({
-        mode: "autoColor",
-        assetId: selectedAsset.id,
-        assetName: selectedAsset.name,
-        model: suggestion.model,
-        summary: suggestion.summary,
-        params,
-        previewUrl
-      });
-      setAiPanelMessage("AI diagnostic candidate generated; current photo is not changed yet");
-      setStatus("AI diagnostic candidate generated; current photo is not changed yet");
-      return {
-        ...suggestion,
-        params
-      };
-    };
-    return () => {
-      if (window.__AUTO_PHOTO_INJECT_AI_SUGGESTION__) {
-        delete window.__AUTO_PHOTO_INJECT_AI_SUGGESTION__;
-      }
-    };
-  }, [selectedAsset]);
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__AUTO_PHOTO_INJECT_AI_CONNECTION_DIAGNOSTIC__ = (diagnostic: AiConnectionDiagnostic) => {
-      setAiConnectionDiagnostic(diagnostic);
-      setAiPanelMessage(diagnostic.message);
-    };
-    return () => {
-      if (window.__AUTO_PHOTO_INJECT_AI_CONNECTION_DIAGNOSTIC__) {
-        delete window.__AUTO_PHOTO_INJECT_AI_CONNECTION_DIAGNOSTIC__;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__AUTO_PHOTO_INJECT_EXPORT_HISTORY__ = (history: ExportJobHistory[]) => {
-      setExportHistory(history);
-    };
-    return () => {
-      if (window.__AUTO_PHOTO_INJECT_EXPORT_HISTORY__) {
-        delete window.__AUTO_PHOTO_INJECT_EXPORT_HISTORY__;
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (isTauriRuntime()) {
