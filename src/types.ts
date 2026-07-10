@@ -44,6 +44,7 @@ export interface EditParams {
   grain: number;
   sharpness: number;
   noiseReduction: number;
+  qualityEnhancement: number;
   skinProtection: number;
   skinSmoothing: number;
   skinTone: number;

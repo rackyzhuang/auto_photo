@@ -43,6 +43,7 @@ export const createDefaultEditParams = (): EditParams => ({
   grain: 0,
   sharpness: 0,
   noiseReduction: 0,
+  qualityEnhancement: 0,
   skinProtection: 65,
   skinSmoothing: 0,
   skinTone: 0,
@@ -148,6 +149,7 @@ export const builtInPresets: Preset[] = [
       clarity: 6,
       texture: -4,
       sharpness: 12,
+      qualityEnhancement: 12,
       skinProtection: 86
     }
   },
@@ -186,6 +188,7 @@ export const builtInPresets: Preset[] = [
       clarity: 12,
       dehaze: 20,
       sharpness: 14,
+      qualityEnhancement: 18,
       hsl: {
         ...createDefaultEditParams().hsl,
         blue: { hue: -4, saturation: 14, luminance: -4 },
@@ -210,7 +213,8 @@ export const builtInPresets: Preset[] = [
       clarity: 14,
       texture: 8,
       dehaze: 24,
-      sharpness: 16
+      sharpness: 16,
+      qualityEnhancement: 24
     }
   },
   {
@@ -274,7 +278,7 @@ export const builtInPresets: Preset[] = [
     series: "建筑",
     name: "室内建筑",
     description: "控制高光，保留空间明暗层次。",
-    params: { exposure: 3, temperature: -3, contrast: 6, highlights: -28, shadows: 20, whites: 6, blacks: -8, transparency: 22, clarity: 10, dehaze: 6, sharpness: 12 }
+    params: { exposure: 3, temperature: -3, contrast: 6, highlights: -28, shadows: 20, whites: 6, blacks: -8, transparency: 22, clarity: 10, dehaze: 6, sharpness: 12, qualityEnhancement: 14 }
   },
   {
     id: "architecture-airy-space",
@@ -295,7 +299,8 @@ export const builtInPresets: Preset[] = [
       clarity: 12,
       texture: 6,
       dehaze: 10,
-      sharpness: 14
+      sharpness: 14,
+      qualityEnhancement: 20
     }
   },
   {
@@ -310,7 +315,7 @@ export const builtInPresets: Preset[] = [
     series: "建筑",
     name: "商业空间",
     description: "干净锐利，适合空间与产品陈列。",
-    params: { exposure: 4, contrast: 10, highlights: -18, shadows: 10, whites: 8, blacks: -8, saturation: -4, transparency: 24, clarity: 12, texture: 8, sharpness: 18 }
+    params: { exposure: 4, contrast: 10, highlights: -18, shadows: 10, whites: 8, blacks: -8, saturation: -4, transparency: 24, clarity: 12, texture: 8, sharpness: 18, qualityEnhancement: 18 }
   },
   {
     id: "architecture-cool-modern",
@@ -359,7 +364,8 @@ export const builtInPresets: Preset[] = [
       clarity: 14,
       texture: 8,
       dehaze: 20,
-      sharpness: 16
+      sharpness: 16,
+      qualityEnhancement: 22
     }
   },
   {

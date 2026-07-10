@@ -378,6 +378,7 @@ export const createAutoEdit = (asset: PhotoAsset, analysis: AutoAnalysis): { edi
   const lowContrastBoost = clamp((54 - analysis.lumaStdDev) * 0.62, 0, 18);
   const hazeBoost = clamp(lowContrastBoost + Math.max(0, 0.1 - analysis.shadowRatio) * 42, 0, 20);
   const transparency = analysis.skinLikeRatio > 0.04 ? clamp(14 + lowContrastBoost * 0.55, 10, 24) : clamp(22 + hazeBoost, 16, 42);
+  const isoNoiseReduction = asset.metadata.iso ? clamp((asset.metadata.iso - 400) / 120, 0, 44) : 8;
 
   if (Math.abs(exposure) > 4) summary.push(exposure > 0 ? "提亮整体曝光" : "压低整体曝光");
   if (Math.abs(temperature) > 4) summary.push(temperature > 0 ? "修正偏冷色温" : "修正偏暖色温");
@@ -398,7 +399,8 @@ export const createAutoEdit = (asset: PhotoAsset, analysis: AutoAnalysis): { edi
     saturation: analysis.skinLikeRatio > 0.04 ? -1 : 2,
     vibrance: analysis.skinLikeRatio > 0.04 ? 10 : 14,
     sharpness: asset.metadata.iso && asset.metadata.iso >= 3200 ? 4 : 10,
-    noiseReduction: asset.metadata.iso ? clamp((asset.metadata.iso - 800) / 180, 0, 22) : 4,
+    noiseReduction: isoNoiseReduction,
+    qualityEnhancement: analysis.skinLikeRatio > 0.04 ? 12 : 18,
     transparency,
     clarity: analysis.skinLikeRatio > 0.04 ? 4 : clamp(10 + lowContrastBoost * 0.25, 8, 16),
     texture: analysis.skinLikeRatio > 0.04 ? -1 : clamp(6 + lowContrastBoost * 0.18, 5, 12),

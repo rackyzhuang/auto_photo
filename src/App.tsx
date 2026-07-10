@@ -17,6 +17,7 @@ import {
   Import,
   Loader2,
   FolderOpen,
+  Maximize2,
   Palette,
   Plus,
   Save,
@@ -29,7 +30,9 @@ import {
   Trash2,
   Undo2,
   Wand2,
-  X
+  X,
+  ZoomIn,
+  ZoomOut
 } from "lucide-react";
 import type {
   AiConnectionDiagnostic,
@@ -106,6 +109,8 @@ interface EditControl {
   step?: number;
 }
 
+const appIconUrl = new URL("./assets/autophoto-logo-transparent.png", import.meta.url).href;
+
 const basicControls: EditControl[] = [
   { key: "exposure", label: "曝光", min: -50, max: 50 },
   { key: "temperature", label: "色温", min: -50, max: 50 },
@@ -127,7 +132,8 @@ const enhancementControls: EditControl[] = [
   { key: "vignette", label: "暗角", min: -50, max: 50 },
   { key: "grain", label: "颗粒", min: 0, max: 50 },
   { key: "sharpness", label: "锐化", min: 0, max: 40 },
-  { key: "noiseReduction", label: "降噪", min: 0, max: 40 },
+  { key: "noiseReduction", label: "降噪", min: 0, max: 100 },
+  { key: "qualityEnhancement", label: "画质增强", min: 0, max: 100 },
   { key: "skinProtection", label: "肤色保护", min: 0, max: 100 }
 ];
 
@@ -137,6 +143,17 @@ const portraitControls: EditControl[] = [
   { key: "teethWhitening", label: "美齿", min: 0, max: 100 },
   { key: "clothingWrinkleReduction", label: "衣物去褶皱", min: 0, max: 100 }
 ];
+
+const hslChannelLabels: Record<(typeof hslChannels)[number], string> = {
+  red: "红色",
+  orange: "橙色",
+  yellow: "黄色",
+  green: "绿色",
+  aqua: "青色",
+  blue: "蓝色",
+  purple: "紫色",
+  magenta: "洋红"
+};
 
 const rotationControls: EditControl[] = [{ key: "rotation", label: "旋转角度", min: -180, max: 180 }];
 
@@ -518,7 +535,8 @@ const AI_SAFE_PARAM_LIMITS: Partial<Record<NumericEditParamKey, { min: number; m
   vignette: { min: -20, max: 24, delta: 18 },
   grain: { min: 0, max: 28, delta: 14 },
   sharpness: { min: 0, max: 24, delta: 12 },
-  noiseReduction: { min: 0, max: 28, delta: 16 },
+  noiseReduction: { min: 0, max: 64, delta: 36 },
+  qualityEnhancement: { min: 0, max: 58, delta: 34 },
   skinProtection: { min: 60, max: 96, delta: 28 },
   skinSmoothing: { min: 0, max: 45, delta: 24 },
   skinTone: { min: -18, max: 18, delta: 14 },
@@ -554,6 +572,19 @@ const makeAiParamsGamutSafe = (baseline: EditParams, params: EditParams): EditPa
     safePatch.saturation = Math.round((safePatch.saturation ?? params.saturation) * reduction);
     safePatch.vibrance = Math.round((safePatch.vibrance ?? params.vibrance) * (0.82 + reduction * 0.18));
     safePatch.dehaze = Math.round((safePatch.dehaze ?? params.dehaze) * (0.76 + reduction * 0.24));
+  }
+  const detailLoad =
+    Math.max(0, safePatch.transparency ?? params.transparency) * 0.24 +
+    Math.max(0, safePatch.clarity ?? params.clarity) * 0.42 +
+    Math.max(0, safePatch.texture ?? params.texture) * 0.32 +
+    Math.max(0, safePatch.dehaze ?? params.dehaze) * 0.34 +
+    Math.max(0, safePatch.sharpness ?? params.sharpness) * 0.48 +
+    Math.max(0, safePatch.qualityEnhancement ?? params.qualityEnhancement) * 0.28;
+  if (detailLoad > 14) {
+    safePatch.noiseReduction = Math.max(
+      safePatch.noiseReduction ?? params.noiseReduction,
+      Math.round(clamp(8 + detailLoad * 0.42, 0, 48))
+    );
   }
 
   safePatch.hsl = Object.fromEntries(
@@ -753,6 +784,12 @@ interface CompareDrag {
   pointerId: number;
 }
 
+interface PreviewPanDrag {
+  pointerId: number;
+  start: { x: number; y: number };
+  initialPan: { x: number; y: number };
+}
+
 interface BatchProcessProgress {
   running: boolean;
   mode: "auto" | "consistency" | "reference";
@@ -778,6 +815,8 @@ export function App() {
   const [originalPreview, setOriginalPreview] = useState<string>();
   const [compareMode, setCompareMode] = useState<CompareMode>("edited");
   const [compareSplit, setCompareSplit] = useState(50);
+  const [previewZoom, setPreviewZoom] = useState(100);
+  const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [isImporting, setIsImporting] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [lastImportReport, setLastImportReport] = useState<ImportReport>();
@@ -844,7 +883,9 @@ export function App() {
   const photoImportInputRef = useRef<HTMLInputElement>(null);
   const referencePhotoInputRef = useRef<HTMLInputElement>(null);
   const pendingReferenceFileResolveRef = useRef<((file?: File) => void)>();
-  const cropBaseImageRef = useRef<HTMLImageElement>(null);
+  const previewImageRef = useRef<HTMLImageElement>(null);
+  const previewImageSizeRef = useRef({ width: 1, height: 1 });
+  const cropFrameRef = useRef<HTMLDivElement>(null);
   const compareViewRef = useRef<HTMLDivElement>(null);
   const exportCancelRef = useRef(false);
   const exportAbortControllerRef = useRef<AbortController>();
@@ -857,6 +898,7 @@ export function App() {
   const originalPreviewCacheRef = useRef<Map<string, string>>(new Map());
   const cropInteractionRef = useRef<CropInteraction>();
   const compareDragRef = useRef<CompareDrag>();
+  const previewPanDragRef = useRef<PreviewPanDrag>();
 
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedId) ?? assets[0],
@@ -1099,6 +1141,9 @@ export function App() {
     editDraftRef.current = undefined;
     cropInteractionRef.current = undefined;
     compareDragRef.current = undefined;
+    previewPanDragRef.current = undefined;
+    setPreviewZoom(100);
+    setPreviewPan({ x: 0, y: 0 });
     setCropDraft(undefined);
     setCropBasePreview(undefined);
   }, [selectedAsset?.id]);
@@ -2086,6 +2131,9 @@ export function App() {
     if (hasAny(["通透", "清透", "干净", "空气", "明亮", "清新"])) {
       additions.push("优先去灰雾、打开中间调和远景层次，保护高光白场，增强局部对比但避免过锐、过饱和和色彩断层");
     }
+    if (hasAny(["清晰", "锐", "细节", "质感", "画质", "高清", "增强"])) {
+      additions.push("提升细节时必须搭配降噪和画质增强，避免把暗部噪点、色块和 JPEG 颗粒一起放大");
+    }
     if (hasAny(["电影", "电影感", "cinematic", "氛围", "故事"])) {
       additions.push("做克制电影感：略压黑位与高光、控制饱和、保留肤色，允许少量暗角和颗粒");
     }
@@ -2115,6 +2163,7 @@ export function App() {
       if (analysis.averageLuma > 178) additions.push("画面偏亮，优先保护高光和白场层次");
       if (analysis.lumaStdDev < 48) additions.push("画面亮度层次偏平，优先提升通透度、去灰雾和中间调局部对比");
       if (analysis.highlightRatio > 0.08) additions.push("高光区域较多，通透处理必须压住白场，避免亮部断层");
+      if (analysis.shadowRatio > 0.18) additions.push("暗部区域较多，清晰度、去雾和锐化必须搭配降噪，避免暗部噪点被放大");
       if (analysis.skinLikeRatio > 0.04) additions.push("检测到人像肤色候选，肤色保护权重需要高于整体风格化");
       if (Math.abs(analysis.warmBias) > 0.18) additions.push("画面已有明显冷暖偏向，调整色温时避免二次过偏");
     }
@@ -2130,7 +2179,7 @@ export function App() {
       raw ? `用户原始想法：${raw}` : undefined,
       `增强后的执行要求：${additions.join("；")}`,
       "输出参数必须保守、可回退、适合摄影后期；如果风格与照片内容冲突，优先保证自然可信"
-      + "；默认目标包含通透、干净、去灰和层次清晰，但禁止用高饱和或硬锐化代替通透"
+      + "；默认目标包含通透、干净、去灰、降噪和层次清晰，但禁止用高饱和、颗粒或硬锐化代替通透"
     ]);
     return enhanced.slice(0, 700);
   };
@@ -2173,6 +2222,8 @@ export function App() {
       texture: clamp(base.texture + intent.airy * (hasPortrait ? 0 : 3) - (hasPortrait ? 4 : 0) - intent.film * 2, -50, 50),
       dehaze: clamp(base.dehaze + intent.airy * (hasPortrait ? 4 : 9) + intent.contrast * 2, -50, 50),
       sharpness: clamp(base.sharpness + intent.airy * (hasPortrait ? 2 : 5), 0, 40),
+      noiseReduction: clamp(base.noiseReduction + intent.airy * (hasPortrait ? 8 : 10) + intent.contrast * 2, 0, 100),
+      qualityEnhancement: clamp(base.qualityEnhancement + intent.airy * (hasPortrait ? 10 : 18) + intent.contrast * 5, 0, 100),
       grain: clamp(base.grain + intent.film * 10, 0, 50),
       skinProtection: clamp(Math.max(base.skinProtection, hasPortrait ? 84 : base.skinProtection), 0, 100),
       skinSmoothing: clamp(base.skinSmoothing + (hasPortrait ? 14 + intent.portrait * 10 : 0), 0, 100),
@@ -2214,6 +2265,8 @@ export function App() {
     vibrance: clamp(primary.vibrance - 4, -50, 50),
     transparency: clamp(primary.transparency + 4, 0, 100),
     clarity: clamp(primary.clarity - 2, -50, 50),
+    noiseReduction: clamp(primary.noiseReduction + 6, 0, 100),
+    qualityEnhancement: clamp(primary.qualityEnhancement + 4, 0, 100),
     skinProtection: clamp(Math.max(primary.skinProtection, 82), 0, 100)
   });
     const expressive = mergeEditParams(scaleAiEditParams(baseline, primary, 1.06), {
@@ -2223,6 +2276,8 @@ export function App() {
       transparency: clamp(primary.transparency + 8, 0, 100),
       clarity: clamp(primary.clarity + 3, -50, 50),
       dehaze: clamp(primary.dehaze + 4, -50, 50),
+      noiseReduction: clamp(primary.noiseReduction + 6, 0, 100),
+      qualityEnhancement: clamp(primary.qualityEnhancement + 8, 0, 100),
       vignette: clamp(primary.vignette + 4, -50, 50),
       grain: clamp(primary.grain + 3, 0, 50)
     });
@@ -2236,7 +2291,8 @@ export function App() {
       clarity: clamp(primary.clarity + 6, -50, 50),
       texture: clamp(primary.texture + 5, -50, 50),
       dehaze: clamp(primary.dehaze + 8, -50, 50),
-      noiseReduction: clamp(primary.noiseReduction + 4, 0, 40),
+      noiseReduction: clamp(primary.noiseReduction + 10, 0, 100),
+      qualityEnhancement: clamp(primary.qualityEnhancement + 14, 0, 100),
       skinProtection: clamp(Math.max(primary.skinProtection, 78), 0, 100)
     });
 
@@ -2714,13 +2770,20 @@ export function App() {
     cropAspectOptions.find((option) => option.value === value)?.label ?? value;
 
   const getCropImageSize = () => {
-    const rect = cropBaseImageRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) return { width: 1, height: 1 };
+    const rect = cropFrameRef.current?.getBoundingClientRect() ?? previewImageRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return previewImageSizeRef.current;
     return { width: rect.width, height: rect.height };
   };
 
+  const rememberPreviewImageSize = (image: HTMLImageElement) => {
+    const rect = image.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      previewImageSizeRef.current = { width: rect.width, height: rect.height };
+    }
+  };
+
   const getCropPointerPoint = (event: React.PointerEvent): { x: number; y: number } | undefined => {
-    const rect = cropBaseImageRef.current?.getBoundingClientRect();
+    const rect = cropFrameRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0 || rect.height <= 0) return undefined;
     return {
       x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
@@ -2732,6 +2795,70 @@ export function App() {
     const rect = compareViewRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return compareSplit;
     return clamp(((event.clientX - rect.left) / rect.width) * 100, 5, 95);
+  };
+
+  const clampPreviewPan = (pan: { x: number; y: number }, zoom = previewZoom) => {
+    if (zoom <= 100) return { x: 0, y: 0 };
+    const stageRect = previewImageRef.current?.closest(".image-stage")?.getBoundingClientRect();
+    const scale = zoom / 100;
+    const maxX = stageRect ? (stageRect.width * (scale - 1)) / 2 : 420;
+    const maxY = stageRect ? (stageRect.height * (scale - 1)) / 2 : 320;
+    return {
+      x: clamp(pan.x, -maxX, maxX),
+      y: clamp(pan.y, -maxY, maxY)
+    };
+  };
+
+  const setPreviewZoomValue = (value: number) => {
+    const nextZoom = Math.round(clamp(value, 50, 400));
+    setPreviewZoom(nextZoom);
+    setPreviewPan((current) => clampPreviewPan(current, nextZoom));
+  };
+
+  const zoomPreviewBy = (delta: number) => setPreviewZoomValue(previewZoom + delta);
+
+  const resetPreviewZoom = () => {
+    setPreviewZoom(100);
+    setPreviewPan({ x: 0, y: 0 });
+  };
+
+  const handlePreviewWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!previewSource || isCropEditing) return;
+    event.preventDefault();
+    const step = event.deltaY < 0 ? 25 : -25;
+    setPreviewZoomValue(previewZoom + step);
+  };
+
+  const beginPreviewPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!previewSource || previewZoom <= 100 || isCropEditing || compareMode === "split") return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    previewPanDragRef.current = {
+      pointerId: event.pointerId,
+      start: { x: event.clientX, y: event.clientY },
+      initialPan: previewPan
+    };
+  };
+
+  const updatePreviewPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    const interaction = previewPanDragRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) return;
+    setPreviewPan(
+      clampPreviewPan({
+        x: interaction.initialPan.x + event.clientX - interaction.start.x,
+        y: interaction.initialPan.y + event.clientY - interaction.start.y
+      })
+    );
+  };
+
+  const endPreviewPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (previewPanDragRef.current?.pointerId !== event.pointerId) return;
+    previewPanDragRef.current = undefined;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released by the browser.
+    }
   };
 
   const beginCompareDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -2759,6 +2886,7 @@ export function App() {
 
   const startCropSession = (aspect: CropAspect = selectedAsset?.edits.cropAspect ?? "free") => {
     if (!selectedAsset || !selectedAssetPreviewEditable) return;
+    resetPreviewZoom();
     const size = getCropImageSize();
     const rect = fitRectToAspect(cropRectFromEdits(selectedAsset.edits), aspect, size.width, size.height);
     setCompareMode("edited");
@@ -2970,6 +3098,7 @@ export function App() {
         grain: 0,
         sharpness: 0,
         noiseReduction: 0,
+        qualityEnhancement: 0,
         skinProtection: 65
       }),
       ["已重置基础调色参数"]
@@ -3701,9 +3830,11 @@ export function App() {
     >
       <aside className="library-panel">
         <div className="brand-block">
-          <div>
-            <p className="eyebrow">AutoPhoto</p>
-            <h1>自动调色工作台</h1>
+          <div className="brand-lockup" aria-label="AutoPhoto">
+            <span className="brand-logo-shell" aria-hidden="true">
+              <img className="brand-logo" src={appIconUrl} alt="" />
+            </span>
+            <span className="brand-name">AutoPhoto</span>
           </div>
           <label className="icon-button import-button" title="导入 JPG / RAW">
             {isImporting ? <Loader2 className="spin" size={20} /> : <ImagePlus size={20} />}
@@ -3895,6 +4026,31 @@ export function App() {
             >
               {compareMode === "original" ? <EyeOff size={19} /> : <Eye size={19} />}
             </button>
+            <button
+              className="icon-button"
+              title="缩小预览"
+              onClick={() => zoomPreviewBy(-25)}
+              disabled={!previewSource || isCropEditing || previewZoom <= 50}
+            >
+              <ZoomOut size={19} />
+            </button>
+            <span className="zoom-value" title="当前预览缩放比例">{previewZoom}%</span>
+            <button
+              className="icon-button"
+              title="放大预览"
+              onClick={() => zoomPreviewBy(25)}
+              disabled={!previewSource || isCropEditing || previewZoom >= 400}
+            >
+              <ZoomIn size={19} />
+            </button>
+            <button
+              className="icon-button"
+              title="重置预览缩放"
+              onClick={resetPreviewZoom}
+              disabled={!previewSource || isCropEditing || previewZoom === 100}
+            >
+              <Maximize2 size={18} />
+            </button>
             <button className="icon-button" title="重置调色" onClick={resetSelected} disabled={!selectedAssetPreviewEditable}>
               <RotateCcw size={19} />
             </button>
@@ -3933,7 +4089,12 @@ export function App() {
           </div>
         </div>
 
-        <div className="image-stage" data-testid="image-stage" onDoubleClick={(event) => event.preventDefault()}>
+        <div
+          className={`image-stage${previewZoom > 100 && !isCropEditing ? " zoomed" : ""}`}
+          data-testid="image-stage"
+          onDoubleClick={(event) => event.preventDefault()}
+          onWheel={handlePreviewWheel}
+        >
           {isAiTuning && (
             <div className="ai-stage-badge" data-testid="ai-stage-badge">
               <Loader2 className="spin" size={16} />
@@ -3986,51 +4147,54 @@ export function App() {
                 </div>
               )}
               {isCropEditing && cropEditorSource && cropDraft ? (
-                <div
-                  className="crop-editor"
-                  data-testid="crop-editor"
-                  onPointerDown={beginCropDraw}
-                  onPointerMove={updateCropPointer}
-                  onPointerUp={endCropPointer}
-                  onPointerCancel={endCropPointer}
-                >
-                  <img ref={cropBaseImageRef} className="crop-editor-image" src={cropEditorSource} alt={`${selectedAsset?.name ?? "preview"} crop`} />
-                  <div className="crop-mask" />
+                <div className="crop-editor" data-testid="crop-editor">
                   <div
-                    className="crop-box"
-                    data-testid="crop-box"
-                    style={{
-                      left: `${cropDraft.rect.x}%`,
-                      top: `${cropDraft.rect.y}%`,
-                      width: `${cropDraft.rect.width}%`,
-                      height: `${cropDraft.rect.height}%`
-                    }}
-                    onPointerDown={beginCropMove}
+                    ref={cropFrameRef}
+                    className="crop-frame"
+                    onPointerDown={beginCropDraw}
+                    onPointerMove={updateCropPointer}
+                    onPointerUp={endCropPointer}
+                    onPointerCancel={endCropPointer}
                   >
-                    <button
-                      type="button"
-                      className="crop-resize-handle crop-resize-nw"
-                      aria-label="调整左上裁切角"
-                      onPointerDown={(event) => beginCropResize("nw", event)}
-                    />
-                    <button
-                      type="button"
-                      className="crop-resize-handle crop-resize-ne"
-                      aria-label="调整右上裁切角"
-                      onPointerDown={(event) => beginCropResize("ne", event)}
-                    />
-                    <button
-                      type="button"
-                      className="crop-resize-handle crop-resize-se"
-                      aria-label="调整右下裁切角"
-                      onPointerDown={(event) => beginCropResize("se", event)}
-                    />
-                    <button
-                      type="button"
-                      className="crop-resize-handle crop-resize-sw"
-                      aria-label="调整左下裁切角"
-                      onPointerDown={(event) => beginCropResize("sw", event)}
-                    />
+                    <img className="crop-sizing-image" src={cropEditorSource} alt="" aria-hidden="true" />
+                    <img className="crop-editor-image" src={cropEditorSource} alt={`${selectedAsset?.name ?? "preview"} crop`} />
+                    <div className="crop-mask" />
+                    <div
+                      className="crop-box"
+                      data-testid="crop-box"
+                      style={{
+                        left: `${cropDraft.rect.x}%`,
+                        top: `${cropDraft.rect.y}%`,
+                        width: `${cropDraft.rect.width}%`,
+                        height: `${cropDraft.rect.height}%`
+                      }}
+                      onPointerDown={beginCropMove}
+                    >
+                      <button
+                        type="button"
+                        className="crop-resize-handle crop-resize-nw"
+                        aria-label="调整左上裁切角"
+                        onPointerDown={(event) => beginCropResize("nw", event)}
+                      />
+                      <button
+                        type="button"
+                        className="crop-resize-handle crop-resize-ne"
+                        aria-label="调整右上裁切角"
+                        onPointerDown={(event) => beginCropResize("ne", event)}
+                      />
+                      <button
+                        type="button"
+                        className="crop-resize-handle crop-resize-se"
+                        aria-label="调整右下裁切角"
+                        onPointerDown={(event) => beginCropResize("se", event)}
+                      />
+                      <button
+                        type="button"
+                        className="crop-resize-handle crop-resize-sw"
+                        aria-label="调整左下裁切角"
+                        onPointerDown={(event) => beginCropResize("sw", event)}
+                      />
+                    </div>
                   </div>
                   <div className="crop-editor-actions" onPointerDown={(event) => event.stopPropagation()}>
                     <button type="button" onClick={confirmCrop}>
@@ -4043,29 +4207,45 @@ export function App() {
                     </button>
                   </div>
                 </div>
-              ) : compareMode === "split" && canCompare ? (
-                <div
-                  ref={compareViewRef}
-                  className="compare-view"
-                  data-testid="compare-view"
-                  onPointerDown={beginCompareDrag}
-                  onPointerMove={updateCompareDrag}
-                  onPointerUp={endCompareDrag}
-                  onPointerCancel={endCompareDrag}
-                >
-                  <img className="compare-sizing-image" src={editedPreviewSource} alt="" aria-hidden="true" />
-                  <img className="compare-image compare-original" src={originalPreviewSource} alt={`${selectedAsset?.name ?? "preview"} original`} />
-                  <div className="compare-edited-layer" style={{ clipPath: `inset(0 ${100 - compareSplit}% 0 0)` }}>
-                    <img className="compare-image" src={editedPreviewSource} alt={`${selectedAsset?.name ?? "preview"} edited`} />
-                  </div>
-                  <div className="compare-divider" style={{ left: `${compareSplit}%` }}>
-                    <span />
-                  </div>
-                  <span className="compare-label original-label">原图</span>
-                  <span className="compare-label edited-label">效果</span>
-                </div>
               ) : (
-                <img src={previewSource} alt={selectedAsset?.name ?? "preview"} />
+                <div
+                  className="preview-zoom-layer"
+                  style={{ transform: `translate(${previewPan.x}px, ${previewPan.y}px) scale(${previewZoom / 100})` }}
+                  onPointerDown={beginPreviewPan}
+                  onPointerMove={updatePreviewPan}
+                  onPointerUp={endPreviewPan}
+                  onPointerCancel={endPreviewPan}
+                >
+                  {compareMode === "split" && canCompare ? (
+                    <div
+                      ref={compareViewRef}
+                      className="compare-view"
+                      data-testid="compare-view"
+                      onPointerDown={beginCompareDrag}
+                      onPointerMove={updateCompareDrag}
+                      onPointerUp={endCompareDrag}
+                      onPointerCancel={endCompareDrag}
+                    >
+                      <img className="compare-sizing-image" src={editedPreviewSource} alt="" aria-hidden="true" />
+                      <img className="compare-image compare-original" src={originalPreviewSource} alt={`${selectedAsset?.name ?? "preview"} original`} />
+                      <div className="compare-edited-layer" style={{ clipPath: `inset(0 ${100 - compareSplit}% 0 0)` }}>
+                        <img className="compare-image" src={editedPreviewSource} alt={`${selectedAsset?.name ?? "preview"} edited`} />
+                      </div>
+                      <div className="compare-divider" style={{ left: `${compareSplit}%` }}>
+                        <span />
+                      </div>
+                      <span className="compare-label original-label">原图</span>
+                      <span className="compare-label edited-label">效果</span>
+                    </div>
+                  ) : (
+                    <img
+                      ref={previewImageRef}
+                      src={previewSource}
+                      alt={selectedAsset?.name ?? "preview"}
+                      onLoad={(event) => rememberPreviewImageSize(event.currentTarget)}
+                    />
+                  )}
+                </div>
               )}
             </>
           ) : (
@@ -4222,7 +4402,7 @@ export function App() {
                     <div className="hsl-card" key={channel}>
                       <div className="hsl-head">
                         <span className={`color-swatch swatch-${channel}`} />
-                        <strong>{channel}</strong>
+                        <strong>{hslChannelLabels[channel]}</strong>
                       </div>
                       <label className="mini-slider">
                         <span>H</span>

@@ -799,6 +799,7 @@ fn ai_params_have_known_numeric_field(params: &serde_json::Value) -> bool {
         "blacks",
         "saturation",
         "vibrance",
+        "transparency",
         "clarity",
         "texture",
         "dehaze",
@@ -806,6 +807,7 @@ fn ai_params_have_known_numeric_field(params: &serde_json::Value) -> bool {
         "grain",
         "sharpness",
         "noiseReduction",
+        "qualityEnhancement",
         "skinProtection",
         "skinSmoothing",
         "skinTone",
@@ -879,9 +881,10 @@ fn tune_photo_with_openai(
     "你是专业摄影后期调色助手，任务是{}。{}\
     用户调色想法：{}\
     只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：\
-    {{\"summary\":\"一句中文说明\",\"params\":{{\"exposure\":0,\"temperature\":0,\"tint\":0,\"contrast\":0,\"highlights\":0,\"shadows\":0,\"whites\":0,\"blacks\":0,\"saturation\":0,\"vibrance\":0,\"clarity\":0,\"texture\":0,\"dehaze\":0,\"vignette\":0,\"grain\":0,\"sharpness\":0,\"noiseReduction\":0,\"skinProtection\":70}}}}。\
+    {{\"summary\":\"一句中文说明\",\"params\":{{\"exposure\":0,\"temperature\":0,\"tint\":0,\"contrast\":0,\"highlights\":0,\"shadows\":0,\"whites\":0,\"blacks\":0,\"saturation\":0,\"vibrance\":0,\"transparency\":0,\"clarity\":0,\"texture\":0,\"dehaze\":0,\"vignette\":0,\"grain\":0,\"sharpness\":0,\"noiseReduction\":0,\"qualityEnhancement\":0,\"skinProtection\":70}}}}。\
     参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；\
-    highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness/noiseReduction 0 到 40；skinProtection 0 到 100。\
+    highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection 0 到 100。\
+    如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，必须同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。\
     可省略不需要修改的字段。不要猜测人物身份。文件名：{}。相机信息：{}。当前参数：{}。",
     mode_label,
     style_instruction,

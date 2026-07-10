@@ -76,12 +76,57 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 14px;
+  min-height: 76px;
+  padding: 16px 18px;
+}
+
+.brand-lockup {
+  display: flex;
+  min-width: 0;
+  align-items: center;
   gap: 12px;
-  padding: 18px;
+}
+
+.brand-logo-shell {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.035)),
+    #1d222b;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 16px 34px rgba(217, 71, 155, 0.18);
+}
+
+.brand-logo {
+  width: 39px;
+  height: 39px;
+  object-fit: contain;
+  filter: saturate(1.06) brightness(1.04) drop-shadow(0 6px 12px rgba(226, 67, 157, 0.32));
+}
+
+.brand-name {
+  max-width: 132px;
+  overflow: hidden;
+  color: #f5f8fb;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-block .import-button {
+  flex: 0 0 auto;
 }
 
 .eyebrow {
-  margin: 0 0 4px;
+  margin: 0;
   color: #8fbfe8;
   font-size: 12px;
   font-weight: 700;
@@ -477,6 +522,20 @@ h2 {
   white-space: nowrap;
 }
 
+.zoom-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 50px;
+  height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #aebbc7;
+  background: #171a1f;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .image-stage {
   position: relative;
   display: flex;
@@ -495,7 +554,27 @@ h2 {
   background-size: 28px 28px;
 }
 
-.image-stage > img {
+.preview-zoom-layer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.image-stage.zoomed .preview-zoom-layer {
+  cursor: grab;
+}
+
+.image-stage.zoomed .preview-zoom-layer:active {
+  cursor: grabbing;
+}
+
+.preview-zoom-layer > img {
   max-width: 100%;
   max-height: 100%;
   min-width: 0;
@@ -506,22 +585,45 @@ h2 {
 
 .crop-editor {
   position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.crop-frame {
+  position: relative;
   display: inline-grid;
   max-width: 100%;
   max-height: 100%;
   min-width: 0;
-  overflow: hidden;
+  min-height: 0;
   border-radius: 8px;
+  overflow: hidden;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
   cursor: crosshair;
   touch-action: none;
 }
 
-.crop-editor-image {
+.crop-sizing-image {
   display: block;
+  grid-area: 1 / 1;
   max-width: 100%;
   max-height: 100%;
   min-width: 0;
+  object-fit: contain;
+  visibility: hidden;
+}
+
+.crop-editor-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   user-select: none;
   pointer-events: none;

@@ -87,26 +87,34 @@ const applyNoiseReduction = (imageData: ImageData, strength: number) => {
 
   const { data, width, height } = imageData;
   const source = new Uint8ClampedArray(data);
-  const amount = clamp(strength / 40, 0, 1);
-  const threshold = 18 + amount * 24;
+  const amount = clamp(strength / 100, 0, 1);
+  const radius = amount > 0.42 ? 2 : 1;
+  const threshold = 10 + amount * 46;
+  const colorThreshold = 18 + amount * 52;
 
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
+  for (let y = radius; y < height - radius; y += 1) {
+    for (let x = radius; x < width - radius; x += 1) {
       const index = (y * width + x) * 4;
       const luma = 0.2126 * source[index] + 0.7152 * source[index + 1] + 0.0722 * source[index + 2];
-      let totalWeight = 1;
-      let red = source[index];
-      let green = source[index + 1];
-      let blue = source[index + 2];
+      let totalWeight = 0;
+      let red = 0;
+      let green = 0;
+      let blue = 0;
 
-      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-          if (offsetX === 0 && offsetY === 0) continue;
+      for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+        for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
           const neighborIndex = ((y + offsetY) * width + x + offsetX) * 4;
           const neighborLuma =
             0.2126 * source[neighborIndex] + 0.7152 * source[neighborIndex + 1] + 0.0722 * source[neighborIndex + 2];
-          const difference = Math.abs(luma - neighborLuma);
-          const weight = Math.max(0, 1 - difference / threshold) * amount;
+          const lumaDifference = Math.abs(luma - neighborLuma);
+          const colorDifference =
+            Math.abs(source[index] - source[neighborIndex]) +
+            Math.abs(source[index + 1] - source[neighborIndex + 1]) +
+            Math.abs(source[index + 2] - source[neighborIndex + 2]);
+          const spatialWeight = offsetX === 0 && offsetY === 0 ? 1 : 1 / (1 + Math.abs(offsetX) + Math.abs(offsetY));
+          const lumaWeight = Math.max(0, 1 - lumaDifference / threshold);
+          const colorWeight = Math.max(0, 1 - colorDifference / (colorThreshold * 3));
+          const weight = spatialWeight * (0.22 + amount * 0.78) * lumaWeight * colorWeight;
           red += source[neighborIndex] * weight;
           green += source[neighborIndex + 1] * weight;
           blue += source[neighborIndex + 2] * weight;
@@ -114,9 +122,48 @@ const applyNoiseReduction = (imageData: ImageData, strength: number) => {
         }
       }
 
-      data[index] = red / totalWeight;
-      data[index + 1] = green / totalWeight;
-      data[index + 2] = blue / totalWeight;
+      const blend = amount * 0.92;
+      data[index] = source[index] * (1 - blend) + (red / (totalWeight || 1)) * blend;
+      data[index + 1] = source[index + 1] * (1 - blend) + (green / (totalWeight || 1)) * blend;
+      data[index + 2] = source[index + 2] * (1 - blend) + (blue / (totalWeight || 1)) * blend;
+    }
+  }
+
+  return imageData;
+};
+
+const applyQualityEnhancement = (imageData: ImageData, strength: number, skinProtection: number) => {
+  const amount = clamp(strength / 100, 0, 1);
+  if (amount <= 0) return imageData;
+
+  const { data, width, height } = imageData;
+  const source = new Uint8ClampedArray(data);
+  const skinGuard = clamp(skinProtection / 100, 0, 1);
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = (y * width + x) * 4;
+      const red = source[index];
+      const green = source[index + 1];
+      const blue = source[index + 2];
+      const luma = getLuma(red, green, blue);
+      const normalizedLuma = luma / 255;
+      const midtoneWeight = clamp(1 - Math.abs(normalizedLuma - 0.5) * 1.65, 0, 1);
+      const highlightGuard = clamp((238 - luma) / 46, 0, 1);
+      const shadowGuard = clamp((luma - 18) / 44, 0, 1);
+      const skinWeight = isSkinLikePixel(red, green, blue) ? 1 - skinGuard * 0.58 : 1;
+      const localLuma =
+        (getLuma(source[((y - 1) * width + x) * 4], source[((y - 1) * width + x) * 4 + 1], source[((y - 1) * width + x) * 4 + 2]) +
+          getLuma(source[((y + 1) * width + x) * 4], source[((y + 1) * width + x) * 4 + 1], source[((y + 1) * width + x) * 4 + 2]) +
+          getLuma(source[(y * width + x - 1) * 4], source[(y * width + x - 1) * 4 + 1], source[(y * width + x - 1) * 4 + 2]) +
+          getLuma(source[(y * width + x + 1) * 4], source[(y * width + x + 1) * 4 + 1], source[(y * width + x + 1) * 4 + 2])) /
+        4;
+      const detail = luma - localLuma;
+      const detailAmount = amount * 0.46 * midtoneWeight * highlightGuard * shadowGuard * skinWeight;
+      const cleanLift = amount * 2.8 * midtoneWeight * highlightGuard * skinWeight;
+      data[index] = clamp(data[index] + detail * detailAmount + cleanLift, 0, 255);
+      data[index + 1] = clamp(data[index + 1] + detail * detailAmount + cleanLift, 0, 255);
+      data[index + 2] = clamp(data[index + 2] + detail * detailAmount + cleanLift, 0, 255);
     }
   }
 
@@ -484,10 +531,11 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
     [data[i], data[i + 1], data[i + 2]] = compressRgbToDisplayGamut(red, green, blue);
   }
 
-  applyNoiseReduction(imageData, edits.noiseReduction);
+  applyNoiseReduction(imageData, Math.max(edits.noiseReduction, edits.qualityEnhancement * 0.22));
   applyTransparencyDetail(imageData, edits.transparency, edits.skinProtection);
   applyLocalDetail(imageData, edits.clarity, edits.texture);
   applyPortraitRetouch(imageData, edits);
+  applyQualityEnhancement(imageData, edits.qualityEnhancement, edits.skinProtection);
   applySharpening(imageData, edits.sharpness);
   applyVignetteAndGrain(imageData, edits.vignette, edits.grain);
 
