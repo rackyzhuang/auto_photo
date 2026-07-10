@@ -2,6 +2,30 @@ import type { EditParams } from "../types";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+const softClipChannel = (value: number) => {
+  if (value < 0) return 255 * (value / (255 + Math.abs(value)));
+  if (value > 255) return 255 + (value - 255) * (255 / (255 + value - 255));
+  return value;
+};
+
+const compressRgbToDisplayGamut = (red: number, green: number, blue: number): [number, number, number] => {
+  let nextRed = softClipChannel(red);
+  let nextGreen = softClipChannel(green);
+  let nextBlue = softClipChannel(blue);
+  const maxChannel = Math.max(nextRed, nextGreen, nextBlue);
+  const minChannel = Math.min(nextRed, nextGreen, nextBlue);
+
+  if (maxChannel > 252 || minChannel < 3) {
+    const luma = clamp(0.2126 * nextRed + 0.7152 * nextGreen + 0.0722 * nextBlue, 0, 255);
+    const compression = maxChannel > 252 && minChannel < 3 ? 0.76 : 0.86;
+    nextRed = luma + (nextRed - luma) * compression;
+    nextGreen = luma + (nextGreen - luma) * compression;
+    nextBlue = luma + (nextBlue - luma) * compression;
+  }
+
+  return [clamp(nextRed, 0, 255), clamp(nextGreen, 0, 255), clamp(nextBlue, 0, 255)];
+};
+
 const rgbToHsl = (red: number, green: number, blue: number): [number, number, number] => {
   const r = red / 255;
   const g = green / 255;
@@ -158,6 +182,55 @@ const applyLocalDetail = (imageData: ImageData, clarity: number, texture: number
   return imageData;
 };
 
+const applyTransparencyDetail = (imageData: ImageData, strength: number, skinProtection: number) => {
+  const amount = clamp(strength / 100, 0, 1);
+  if (amount <= 0) return imageData;
+
+  const { data, width, height } = imageData;
+  const source = new Uint8ClampedArray(data);
+  const skinGuard = clamp(skinProtection / 100, 0, 1);
+  const offsets = [
+    [-2, 0],
+    [2, 0],
+    [0, -2],
+    [0, 2],
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1]
+  ];
+
+  for (let y = 2; y < height - 2; y += 1) {
+    for (let x = 2; x < width - 2; x += 1) {
+      const index = (y * width + x) * 4;
+      const red = source[index];
+      const green = source[index + 1];
+      const blue = source[index + 2];
+      const luma = getLuma(red, green, blue);
+      const normalizedLuma = luma / 255;
+      const midtoneWeight = clamp(1 - Math.abs(normalizedLuma - 0.52) * 1.75, 0, 1);
+      if (midtoneWeight <= 0) continue;
+
+      let localLuma = 0;
+      for (const [offsetX, offsetY] of offsets) {
+        const neighborIndex = ((y + offsetY) * width + x + offsetX) * 4;
+        localLuma += getLuma(source[neighborIndex], source[neighborIndex + 1], source[neighborIndex + 2]);
+      }
+      localLuma /= offsets.length;
+
+      const skinWeight = isSkinLikePixel(red, green, blue) ? 1 - skinGuard * 0.68 : 1;
+      const detail = luma - localLuma;
+      const detailAmount = amount * 0.38 * midtoneWeight * skinWeight;
+      const lift = amount * 5.5 * midtoneWeight * skinWeight;
+      data[index] = clamp(data[index] + detail * detailAmount + lift, 0, 255);
+      data[index + 1] = clamp(data[index + 1] + detail * detailAmount + lift, 0, 255);
+      data[index + 2] = clamp(data[index + 2] + detail * detailAmount + lift, 0, 255);
+    }
+  }
+
+  return imageData;
+};
+
 const stableNoise = (x: number, y: number) => {
   const value = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
   return value - Math.floor(value);
@@ -248,12 +321,49 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams) => {
         nextGreen = nextGreen * (1 - amount) + target * amount;
         nextBlue = nextBlue * (1 - amount) + (target + 8 * amount) * amount;
       } else if (clothingWrinkleReduction > 0) {
-        const localContrast = Math.abs(red - blurRed) + Math.abs(green - blurGreen) + Math.abs(blue - blurBlue);
-        const wrinkleMask = luma > 34 && luma < 226 ? clamp((localContrast - 10) / 64, 0, 1) : 0;
-        const amount = clothingWrinkleReduction * wrinkleMask * 0.42;
-        nextRed = nextRed * (1 - amount) + blurRed * amount;
-        nextGreen = nextGreen * (1 - amount) + blurGreen * amount;
-        nextBlue = nextBlue * (1 - amount) + blurBlue * amount;
+        let clothRed = red * 1.8;
+        let clothGreen = green * 1.8;
+        let clothBlue = blue * 1.8;
+        let clothWeight = 1.8;
+
+        for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
+          for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
+            if ((offsetX === 0 && offsetY === 0) || Math.abs(offsetX) + Math.abs(offsetY) > 3) continue;
+            const sampleX = x + offsetX;
+            const sampleY = y + offsetY;
+            if (sampleX < 0 || sampleY < 0 || sampleX >= width || sampleY >= height) continue;
+            const neighborIndex = (sampleY * width + sampleX) * 4;
+            const neighborRed = source[neighborIndex];
+            const neighborGreen = source[neighborIndex + 1];
+            const neighborBlue = source[neighborIndex + 2];
+            const neighborLuma = getLuma(neighborRed, neighborGreen, neighborBlue);
+            const edgeWeight = clamp(1 - Math.abs(luma - neighborLuma) / 58, 0, 1);
+            const distanceWeight = Math.abs(offsetX) + Math.abs(offsetY) <= 1 ? 1 : 0.62;
+            const weight = edgeWeight * distanceWeight;
+            clothRed += neighborRed * weight;
+            clothGreen += neighborGreen * weight;
+            clothBlue += neighborBlue * weight;
+            clothWeight += weight;
+          }
+        }
+
+        clothRed /= clothWeight || 1;
+        clothGreen /= clothWeight || 1;
+        clothBlue /= clothWeight || 1;
+
+        const localContrast =
+          Math.abs(red - blurRed) +
+          Math.abs(green - blurGreen) +
+          Math.abs(blue - blurBlue) +
+          Math.abs(red - clothRed) * 0.65 +
+          Math.abs(green - clothGreen) * 0.65 +
+          Math.abs(blue - clothBlue) * 0.65;
+        const lumaMask = clamp((luma - 18) / 42, 0, 1) * clamp((246 - luma) / 48, 0, 1);
+        const wrinkleMask = lumaMask * clamp((localContrast - 5) / 58, 0, 1);
+        const amount = clothingWrinkleReduction * wrinkleMask * (0.68 + clothingWrinkleReduction * 0.24);
+        nextRed = nextRed * (1 - amount) + clothRed * amount;
+        nextGreen = nextGreen * (1 - amount) + clothGreen * amount;
+        nextBlue = nextBlue * (1 - amount) + clothBlue * amount;
       }
 
       data[index] = clamp(nextRed, 0, 255);
@@ -305,7 +415,8 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
   const exposureGain = 1 + edits.exposure / 100;
   const contrast = 1 + edits.contrast / 100;
   const dehaze = edits.dehaze / 100;
-  const saturation = 1 + (edits.saturation + edits.vibrance * 0.65 + edits.dehaze * 0.12) / 100;
+  const transparency = clamp(edits.transparency / 100, 0, 1);
+  const saturation = 1 + (edits.saturation + edits.vibrance * 0.65 + edits.dehaze * 0.12 + edits.transparency * 0.08) / 100;
   const warmthR = edits.temperature * 0.9;
   const warmthB = -edits.temperature * 0.9;
   const tintG = -edits.tint * 0.5;
@@ -326,10 +437,12 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
     const normalizedLuma = luma / 255;
     const isSkinLike = isSkinLikePixel(originalRed, originalGreen, originalBlue);
 
+    const midtoneWeight = clamp(1 - Math.abs(normalizedLuma - 0.52) * 1.85, 0, 1);
     const dehazeContrast = 1 + dehaze * 0.32 * Math.max(0.15, Math.abs(normalizedLuma - 0.5) * 1.8);
-    red = (red - 128) * contrast * dehazeContrast + 128;
-    green = (green - 128) * contrast * dehazeContrast + 128;
-    blue = (blue - 128) * contrast * dehazeContrast + 128;
+    const transparencyContrast = 1 + transparency * 0.22 * Math.max(0.22, midtoneWeight);
+    red = (red - 128) * contrast * dehazeContrast * transparencyContrast + 128;
+    green = (green - 128) * contrast * dehazeContrast * transparencyContrast + 128;
+    blue = (blue - 128) * contrast * dehazeContrast * transparencyContrast + 128;
 
     const shadowFactor = Math.max(0, 1 - normalizedLuma * 1.4) * shadowLift * 42;
     const highlightFactor = Math.max(0, normalizedLuma - 0.62) * highlightPull * 58;
@@ -338,9 +451,18 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
     blue += shadowFactor + highlightFactor;
 
     const dehazeOffset = dehaze * 10 * (normalizedLuma - 0.42);
+    const transparencyOffset =
+      transparency *
+      (midtoneWeight * 7.5 +
+        Math.max(0, normalizedLuma - 0.58) * 9 -
+        Math.max(0, normalizedLuma - 0.86) * 32 -
+        Math.max(0, 0.16 - normalizedLuma) * 18);
     red = red * exposureGain + warmthR + whitePoint * 255 + blackPoint * 255 + dehazeOffset;
     green = green * exposureGain + tintG + whitePoint * 255 + blackPoint * 255 + dehazeOffset;
     blue = blue * exposureGain + warmthB + whitePoint * 255 + blackPoint * 255 + dehazeOffset;
+    red += transparencyOffset;
+    green += transparencyOffset;
+    blue += transparencyOffset;
 
     const gray = 0.299 * red + 0.587 * green + 0.114 * blue;
     const localSaturation = isSkinLike ? 1 + (saturation - 1) * (1 - skinGuard * 0.74) : saturation;
@@ -359,12 +481,11 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
       [red, green, blue] = hslToRgb(adjustedHue, adjustedSaturation, adjustedLightness);
     }
 
-    data[i] = clamp(red, 0, 255);
-    data[i + 1] = clamp(green, 0, 255);
-    data[i + 2] = clamp(blue, 0, 255);
+    [data[i], data[i + 1], data[i + 2]] = compressRgbToDisplayGamut(red, green, blue);
   }
 
   applyNoiseReduction(imageData, edits.noiseReduction);
+  applyTransparencyDetail(imageData, edits.transparency, edits.skinProtection);
   applyLocalDetail(imageData, edits.clarity, edits.texture);
   applyPortraitRetouch(imageData, edits);
   applySharpening(imageData, edits.sharpness);

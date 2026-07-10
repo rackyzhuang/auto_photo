@@ -35,6 +35,7 @@ export const createDefaultEditParams = (): EditParams => ({
   blacks: 0,
   saturation: 0,
   vibrance: 0,
+  transparency: 0,
   clarity: 0,
   texture: 0,
   dehaze: 0,
@@ -124,6 +125,7 @@ export const builtInPresets: Preset[] = [
       shadows: 18,
       whites: 8,
       vibrance: 10,
+      transparency: 18,
       clarity: -4,
       texture: -6,
       skinProtection: 86
@@ -180,14 +182,35 @@ export const builtInPresets: Preset[] = [
       whites: 10,
       blacks: -8,
       vibrance: 18,
+      transparency: 36,
       clarity: 12,
-      dehaze: 14,
+      dehaze: 20,
       sharpness: 14,
       hsl: {
         ...createDefaultEditParams().hsl,
         blue: { hue: -4, saturation: 14, luminance: -4 },
         aqua: { hue: -3, saturation: 8, luminance: 2 }
       }
+    }
+  },
+  {
+    id: "landscape-air-clear",
+    series: "风光",
+    name: "空气通透",
+    description: "去灰提层次，让远景和天空更干净。",
+    params: {
+      exposure: 4,
+      contrast: 12,
+      highlights: -24,
+      shadows: 18,
+      whites: 14,
+      blacks: -12,
+      vibrance: 16,
+      transparency: 44,
+      clarity: 14,
+      texture: 8,
+      dehaze: 24,
+      sharpness: 16
     }
   },
   {
@@ -237,21 +260,43 @@ export const builtInPresets: Preset[] = [
     series: "风光",
     name: "雪景冷净",
     description: "冷净白场，保留雪地层次。",
-    params: { exposure: 5, temperature: -12, tint: 2, contrast: 6, highlights: -24, shadows: 12, whites: 12, saturation: -4, clarity: 8, dehaze: 6 }
+    params: { exposure: 5, temperature: -12, tint: 2, contrast: 6, highlights: -24, shadows: 12, whites: 12, saturation: -4, transparency: 20, clarity: 8, dehaze: 6 }
   },
   {
     id: "landscape-mountain-contrast",
     series: "风光",
     name: "山野高对比",
     description: "加强岩石、云层和远山结构。",
-    params: { exposure: -1, contrast: 18, highlights: -20, shadows: 8, blacks: -14, vibrance: 12, clarity: 16, texture: 10, dehaze: 12, sharpness: 16 }
+    params: { exposure: -1, contrast: 18, highlights: -20, shadows: 8, blacks: -14, vibrance: 12, transparency: 30, clarity: 16, texture: 10, dehaze: 16, sharpness: 16 }
   },
   {
     id: "architecture-interior",
     series: "建筑",
     name: "室内建筑",
     description: "控制高光，保留空间明暗层次。",
-    params: { exposure: 3, temperature: -3, contrast: 6, highlights: -28, shadows: 20, whites: 6, blacks: -8, clarity: 10, sharpness: 12 }
+    params: { exposure: 3, temperature: -3, contrast: 6, highlights: -28, shadows: 20, whites: 6, blacks: -8, transparency: 22, clarity: 10, dehaze: 6, sharpness: 12 }
+  },
+  {
+    id: "architecture-airy-space",
+    series: "建筑",
+    name: "空间通透",
+    description: "白场干净、暗部有层次，适合室内和展厅。",
+    params: {
+      exposure: 5,
+      temperature: -4,
+      contrast: 8,
+      highlights: -30,
+      shadows: 22,
+      whites: 12,
+      blacks: -10,
+      saturation: -4,
+      vibrance: 8,
+      transparency: 32,
+      clarity: 12,
+      texture: 6,
+      dehaze: 10,
+      sharpness: 14
+    }
   },
   {
     id: "architecture-white-wall",
@@ -265,14 +310,14 @@ export const builtInPresets: Preset[] = [
     series: "建筑",
     name: "商业空间",
     description: "干净锐利，适合空间与产品陈列。",
-    params: { exposure: 4, contrast: 10, highlights: -18, shadows: 10, whites: 8, blacks: -8, saturation: -4, clarity: 12, texture: 8, sharpness: 18 }
+    params: { exposure: 4, contrast: 10, highlights: -18, shadows: 10, whites: 8, blacks: -8, saturation: -4, transparency: 24, clarity: 12, texture: 8, sharpness: 18 }
   },
   {
     id: "architecture-cool-modern",
     series: "建筑",
     name: "冷调建筑",
     description: "冷静线条与现代感。",
-    params: { exposure: 1, temperature: -10, contrast: 14, highlights: -16, shadows: 8, saturation: -10, clarity: 14, dehaze: 5, sharpness: 16 }
+    params: { exposure: 1, temperature: -10, contrast: 14, highlights: -16, shadows: 8, saturation: -10, transparency: 28, clarity: 14, dehaze: 10, sharpness: 16 }
   },
   {
     id: "architecture-warm-hotel",
@@ -293,7 +338,29 @@ export const builtInPresets: Preset[] = [
     series: "城市",
     name: "夜景霓虹",
     description: "保留霓虹色彩，压住过亮招牌。",
-    params: { exposure: -4, temperature: -4, tint: 4, contrast: 12, highlights: -32, shadows: 18, blacks: -12, vibrance: 20, clarity: 8, dehaze: 8 }
+    params: { exposure: -4, temperature: -4, tint: 4, contrast: 12, highlights: -32, shadows: 18, blacks: -12, vibrance: 20, transparency: 24, clarity: 8, dehaze: 12 }
+  },
+  {
+    id: "city-clean-air",
+    series: "城市",
+    name: "城市通透",
+    description: "压住灰雾和杂光，让街景更清晰利落。",
+    params: {
+      exposure: 2,
+      temperature: -4,
+      contrast: 16,
+      highlights: -24,
+      shadows: 14,
+      whites: 10,
+      blacks: -14,
+      saturation: -2,
+      vibrance: 14,
+      transparency: 38,
+      clarity: 14,
+      texture: 8,
+      dehaze: 20,
+      sharpness: 16
+    }
   },
   {
     id: "city-rain",
@@ -371,6 +438,225 @@ export const builtInPresets: Preset[] = [
         red: { hue: -2, saturation: 10, luminance: 0 },
         green: { hue: -4, saturation: 12, luminance: -2 },
         blue: { hue: -4, saturation: 14, luminance: -4 }
+      }
+    }
+  },
+  {
+    id: "creative-teal-orange",
+    series: "个性",
+    name: "青橙电影",
+    description: "青色阴影与暖色高光，适合电影感街拍。",
+    params: {
+      exposure: -2,
+      temperature: 4,
+      tint: -2,
+      contrast: 18,
+      highlights: -22,
+      shadows: 8,
+      blacks: -18,
+      saturation: -4,
+      vibrance: 18,
+      clarity: 10,
+      dehaze: 8,
+      vignette: 12,
+      grain: 8,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        orange: { hue: -4, saturation: 10, luminance: 4 },
+        yellow: { hue: -18, saturation: -10, luminance: -2 },
+        aqua: { hue: -12, saturation: 14, luminance: -4 },
+        blue: { hue: -10, saturation: 18, luminance: -8 }
+      }
+    }
+  },
+  {
+    id: "creative-cyber-neon",
+    series: "个性",
+    name: "赛博霓虹",
+    description: "高对比霓虹色，适合夜景和灯牌。",
+    params: {
+      exposure: -6,
+      temperature: -8,
+      tint: 8,
+      contrast: 24,
+      highlights: -30,
+      shadows: 18,
+      blacks: -24,
+      saturation: 8,
+      vibrance: 28,
+      clarity: 12,
+      dehaze: 10,
+      vignette: 16,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        red: { hue: -8, saturation: 16, luminance: -2 },
+        magenta: { hue: 8, saturation: 24, luminance: 2 },
+        purple: { hue: 10, saturation: 18, luminance: -4 },
+        blue: { hue: -12, saturation: 20, luminance: -8 }
+      }
+    }
+  },
+  {
+    id: "creative-faded-film",
+    series: "个性",
+    name: "褪色胶片",
+    description: "低黑位、柔对比和淡彩旧照片氛围。",
+    params: {
+      exposure: 4,
+      temperature: 8,
+      tint: 3,
+      contrast: -16,
+      highlights: -18,
+      shadows: 22,
+      whites: -4,
+      blacks: 16,
+      saturation: -16,
+      vibrance: 6,
+      clarity: -8,
+      grain: 24,
+      vignette: 8,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        yellow: { hue: -10, saturation: -14, luminance: 4 },
+        green: { hue: -18, saturation: -22, luminance: 2 },
+        blue: { hue: -16, saturation: -26, luminance: 6 }
+      }
+    }
+  },
+  {
+    id: "creative-hk-flash",
+    series: "个性",
+    name: "港风闪光",
+    description: "硬朗闪光质感，高反差与浓郁红橙。",
+    params: {
+      exposure: 3,
+      temperature: 6,
+      tint: 5,
+      contrast: 22,
+      highlights: -10,
+      shadows: -6,
+      whites: 10,
+      blacks: -22,
+      saturation: 4,
+      vibrance: 18,
+      clarity: 16,
+      texture: 8,
+      sharpness: 18,
+      grain: 10,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        red: { hue: -4, saturation: 14, luminance: 2 },
+        orange: { hue: -6, saturation: 10, luminance: 6 },
+        green: { hue: -16, saturation: -12, luminance: -4 }
+      }
+    }
+  },
+  {
+    id: "creative-cold-blue-gray",
+    series: "个性",
+    name: "冷蓝灰调",
+    description: "低饱和蓝灰阴影，适合冷静情绪片。",
+    params: {
+      exposure: -3,
+      temperature: -16,
+      tint: -2,
+      contrast: 10,
+      highlights: -20,
+      shadows: 14,
+      blacks: -10,
+      saturation: -22,
+      vibrance: 6,
+      clarity: 8,
+      dehaze: 5,
+      vignette: 10,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        aqua: { hue: -8, saturation: 8, luminance: -2 },
+        blue: { hue: -6, saturation: 10, luminance: -6 },
+        orange: { hue: 4, saturation: -8, luminance: 4 }
+      }
+    }
+  },
+  {
+    id: "creative-matte-pink-cyan",
+    series: "个性",
+    name: "粉青雾面",
+    description: "浅粉肤色与青色暗部，整体柔和雾面。",
+    params: {
+      exposure: 6,
+      temperature: 2,
+      tint: 8,
+      contrast: -10,
+      highlights: -18,
+      shadows: 20,
+      blacks: 10,
+      saturation: -6,
+      vibrance: 14,
+      clarity: -10,
+      texture: -8,
+      grain: 10,
+      skinProtection: 88,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        red: { hue: 4, saturation: -6, luminance: 6 },
+        orange: { hue: -2, saturation: -4, luminance: 8 },
+        aqua: { hue: -10, saturation: 10, luminance: 4 },
+        blue: { hue: -12, saturation: -8, luminance: 8 }
+      }
+    }
+  },
+  {
+    id: "creative-premium-gray",
+    series: "个性",
+    name: "高级灰",
+    description: "压低杂色，保留质感和克制对比。",
+    params: {
+      exposure: 1,
+      temperature: -2,
+      contrast: 12,
+      highlights: -20,
+      shadows: 10,
+      whites: 4,
+      blacks: -12,
+      saturation: -26,
+      vibrance: -4,
+      clarity: 12,
+      texture: 6,
+      sharpness: 12,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        red: { hue: 0, saturation: -12, luminance: 2 },
+        orange: { hue: 0, saturation: -10, luminance: 4 },
+        yellow: { hue: -8, saturation: -26, luminance: 0 },
+        green: { hue: -10, saturation: -32, luminance: -2 },
+        blue: { hue: -6, saturation: -24, luminance: -4 }
+      }
+    }
+  },
+  {
+    id: "creative-cross-process",
+    series: "个性",
+    name: "交叉冲洗",
+    description: "偏绿高光和偏蓝阴影，带实验胶片感。",
+    params: {
+      exposure: 2,
+      temperature: -4,
+      tint: -10,
+      contrast: 18,
+      highlights: -12,
+      shadows: 8,
+      blacks: -16,
+      saturation: 2,
+      vibrance: 20,
+      clarity: 8,
+      grain: 18,
+      vignette: 8,
+      hsl: {
+        ...createDefaultEditParams().hsl,
+        yellow: { hue: -20, saturation: 8, luminance: 2 },
+        green: { hue: -18, saturation: 16, luminance: -2 },
+        blue: { hue: 12, saturation: 18, luminance: -8 },
+        purple: { hue: 10, saturation: 12, luminance: -4 }
       }
     }
   },

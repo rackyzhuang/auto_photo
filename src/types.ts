@@ -36,6 +36,7 @@ export interface EditParams {
   blacks: number;
   saturation: number;
   vibrance: number;
+  transparency: number;
   clarity: number;
   texture: number;
   dehaze: number;
@@ -84,6 +85,9 @@ export interface PhotoAsset {
 
 export interface AutoAnalysis {
   averageLuma: number;
+  lumaStdDev: number;
+  shadowRatio: number;
+  highlightRatio: number;
   redBalance: number;
   greenBalance: number;
   blueBalance: number;

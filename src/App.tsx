@@ -72,8 +72,10 @@ import { desktopPhotoPayloadToFile } from "./services/desktopImportPayload";
 import { disposePreviewWorker, renderPreviewWithWorkerFallback } from "./services/previewWorkerClient";
 import { loadStoredState, saveStoredState } from "./services/storage";
 import {
+  clearExportJobs,
   chooseExportDirectory,
   choosePhotoFilePaths,
+  chooseReferencePhotoFilePath,
   diagnoseAiConnection,
   getAiSettings,
   getProjectStoreSummary,
@@ -89,7 +91,6 @@ import {
   saveAiSettings,
   saveNamedProjectSnapshot,
   saveExportFile,
-  saveProjectSnapshotToDb,
   tunePhotoWithAi
 } from "./services/desktopBridge";
 
@@ -119,6 +120,7 @@ const basicControls: EditControl[] = [
 ];
 
 const enhancementControls: EditControl[] = [
+  { key: "transparency", label: "通透", min: 0, max: 100 },
   { key: "clarity", label: "清晰度", min: -50, max: 50 },
   { key: "texture", label: "纹理", min: -50, max: 50 },
   { key: "dehaze", label: "去雾", min: -50, max: 50 },
@@ -405,6 +407,25 @@ const createCropNeutralEdits = (edits: EditParams) =>
     cropHeight: 100
   });
 
+const compactInstruction = (lines: Array<string | undefined>) =>
+  lines
+    .filter(Boolean)
+    .join("；")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const createCompareOriginalEdits = (edits: EditParams) => {
+  const defaults = createDefaultEditParams();
+  return mergeEditParams(defaults, {
+    rotation: edits.rotation,
+    cropAspect: edits.cropAspect,
+    cropX: edits.cropX,
+    cropY: edits.cropY,
+    cropWidth: edits.cropWidth,
+    cropHeight: edits.cropHeight
+  });
+};
+
 interface EditHistory {
   past: EditParams[];
   future: EditParams[];
@@ -459,9 +480,11 @@ interface ConsistencyAnalysisItem {
 }
 
 interface AiPendingSuggestion {
+  id: string;
   mode: AiTuningMode;
   assetId: string;
   assetName: string;
+  label: string;
   model: string;
   summary: string;
   fallbackHint?: string;
@@ -476,6 +499,141 @@ declare global {
 }
 
 const numericAiControls = [...basicControls, ...enhancementControls, ...portraitControls];
+
+const AI_SAFE_PARAM_LIMITS: Partial<Record<NumericEditParamKey, { min: number; max: number; delta: number }>> = {
+  exposure: { min: -24, max: 24, delta: 16 },
+  temperature: { min: -26, max: 26, delta: 20 },
+  tint: { min: -22, max: 22, delta: 18 },
+  contrast: { min: -22, max: 26, delta: 18 },
+  highlights: { min: -44, max: 22, delta: 24 },
+  shadows: { min: -24, max: 42, delta: 24 },
+  whites: { min: -24, max: 24, delta: 18 },
+  blacks: { min: -28, max: 18, delta: 18 },
+  saturation: { min: -24, max: 24, delta: 16 },
+  vibrance: { min: -24, max: 30, delta: 18 },
+  transparency: { min: 0, max: 58, delta: 34 },
+  clarity: { min: -22, max: 26, delta: 18 },
+  texture: { min: -22, max: 24, delta: 18 },
+  dehaze: { min: -18, max: 18, delta: 14 },
+  vignette: { min: -20, max: 24, delta: 18 },
+  grain: { min: 0, max: 28, delta: 14 },
+  sharpness: { min: 0, max: 24, delta: 12 },
+  noiseReduction: { min: 0, max: 28, delta: 16 },
+  skinProtection: { min: 60, max: 96, delta: 28 },
+  skinSmoothing: { min: 0, max: 45, delta: 24 },
+  skinTone: { min: -18, max: 18, delta: 14 },
+  teethWhitening: { min: 0, max: 42, delta: 22 },
+  clothingWrinkleReduction: { min: 0, max: 55, delta: 28 }
+};
+
+const clampAiValueAroundBaseline = (key: NumericEditParamKey, baseline: EditParams, value: number) => {
+  const control = numericAiControls.find((item) => item.key === key);
+  const safe = AI_SAFE_PARAM_LIMITS[key];
+  if (!control || !safe) return value;
+  const baseValue = baseline[key];
+  const limited = clamp(value, Math.max(control.min, safe.min), Math.min(control.max, safe.max));
+  return clamp(limited, baseValue - safe.delta, baseValue + safe.delta);
+};
+
+const makeAiParamsGamutSafe = (baseline: EditParams, params: EditParams): EditParams => {
+  const safePatch: Partial<EditParams> = {};
+
+  numericAiControls.forEach((control) => {
+    const value = params[control.key];
+    safePatch[control.key] = clampAiValueAroundBaseline(control.key, baseline, value);
+  });
+
+  const colorLoad =
+    Math.max(0, safePatch.saturation ?? params.saturation) +
+    Math.max(0, safePatch.vibrance ?? params.vibrance) * 0.72 +
+    Math.max(0, safePatch.dehaze ?? params.dehaze) * 0.32 +
+    Math.max(0, safePatch.transparency ?? params.transparency) * 0.12 +
+    Math.max(0, safePatch.contrast ?? params.contrast) * 0.18;
+  if (colorLoad > 42) {
+    const reduction = 42 / colorLoad;
+    safePatch.saturation = Math.round((safePatch.saturation ?? params.saturation) * reduction);
+    safePatch.vibrance = Math.round((safePatch.vibrance ?? params.vibrance) * (0.82 + reduction * 0.18));
+    safePatch.dehaze = Math.round((safePatch.dehaze ?? params.dehaze) * (0.76 + reduction * 0.24));
+  }
+
+  safePatch.hsl = Object.fromEntries(
+    hslChannels.map((channel) => {
+      const baseChannel = baseline.hsl[channel];
+      const targetChannel = params.hsl[channel];
+      return [
+        channel,
+        {
+          hue: clamp(targetChannel.hue, baseChannel.hue - 16, baseChannel.hue + 16),
+          saturation: clamp(targetChannel.saturation, baseChannel.saturation - 14, baseChannel.saturation + 14),
+          luminance: clamp(targetChannel.luminance, baseChannel.luminance - 14, baseChannel.luminance + 14)
+        }
+      ];
+    })
+  ) as EditParams["hsl"];
+
+  return normalizeEditParams({
+    ...baseline,
+    ...safePatch
+  });
+};
+
+const blendAiEditParams = (baseline: EditParams, target: EditParams, strength: number): EditParams => {
+  const amount = clamp(strength / 100, 0, 1);
+  const normalizedBase = normalizeEditParams(baseline);
+  const normalizedTarget = normalizeEditParams(target);
+  const patch: Partial<EditParams> = {};
+
+  numericAiControls.forEach((control) => {
+    const value = normalizedBase[control.key] + (normalizedTarget[control.key] - normalizedBase[control.key]) * amount;
+    patch[control.key] = clamp(roundToStep(value, control.step ?? 1), control.min, control.max);
+  });
+
+  patch.hsl = Object.fromEntries(
+    hslChannels.map((channel) => [
+      channel,
+      {
+        hue: clamp(roundToStep(normalizedBase.hsl[channel].hue + (normalizedTarget.hsl[channel].hue - normalizedBase.hsl[channel].hue) * amount), -50, 50),
+        saturation: clamp(
+          roundToStep(normalizedBase.hsl[channel].saturation + (normalizedTarget.hsl[channel].saturation - normalizedBase.hsl[channel].saturation) * amount),
+          -50,
+          50
+        ),
+        luminance: clamp(
+          roundToStep(normalizedBase.hsl[channel].luminance + (normalizedTarget.hsl[channel].luminance - normalizedBase.hsl[channel].luminance) * amount),
+          -50,
+          50
+        )
+      }
+    ])
+  ) as EditParams["hsl"];
+
+  return makeAiParamsGamutSafe(normalizedBase, normalizeEditParams({
+    ...normalizedBase,
+    ...patch
+  }));
+};
+
+const scaleAiEditParams = (baseline: EditParams, target: EditParams, scale: number, patch: Partial<EditParams> = {}) => {
+  const normalizedBase = normalizeEditParams(baseline);
+  const normalizedTarget = normalizeEditParams(target);
+  const scaled: Partial<EditParams> = {};
+
+  numericAiControls.forEach((control) => {
+    const value = normalizedBase[control.key] + (normalizedTarget[control.key] - normalizedBase[control.key]) * scale;
+    scaled[control.key] = clamp(roundToStep(value, control.step ?? 1), control.min, control.max);
+  });
+
+  return makeAiParamsGamutSafe(
+    normalizedBase,
+    mergeEditParams(
+    normalizeEditParams({
+      ...normalizedBase,
+      ...scaled
+    }),
+    patch
+    )
+  );
+};
 
 const normalizeAiSuggestionParams = (baseline: EditParams, result: AiTuningResult): EditParams => {
   const incoming = result.params ?? {};
@@ -513,17 +671,17 @@ const normalizeAiSuggestionParams = (baseline: EditParams, result: AiTuningResul
     patch.hsl = nextHsl;
   }
 
-  return normalizeEditParams({
+  return makeAiParamsGamutSafe(baseline, normalizeEditParams({
     ...baseline,
     ...patch,
     hsl: patch.hsl ?? baseline.hsl
-  });
+  }));
 };
 
 const defaultOpenGroups = {
-  basic: true,
-  enhancement: true,
-  geometry: true,
+  basic: false,
+  enhancement: false,
+  geometry: false,
   portrait: false,
   hsl: false,
   presets: false,
@@ -541,6 +699,7 @@ function AccordionSection({
   isOpen,
   onToggle,
   children,
+  className,
   testId
 }: {
   title: string;
@@ -548,10 +707,11 @@ function AccordionSection({
   isOpen: boolean;
   onToggle: () => void;
   children: ReactNode;
+  className?: string;
   testId?: string;
 }) {
   return (
-    <section className="accordion-section">
+    <section className={`accordion-section${className ? ` ${className}` : ""}`}>
       <button className="accordion-trigger" type="button" onClick={onToggle} aria-expanded={isOpen} data-testid={testId}>
         {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         <span>
@@ -589,9 +749,13 @@ interface CropInteraction {
   corner?: CropResizeCorner;
 }
 
+interface CompareDrag {
+  pointerId: number;
+}
+
 interface BatchProcessProgress {
   running: boolean;
-  mode: "auto" | "consistency" | "reference" | "aiAuto" | "aiStyle";
+  mode: "auto" | "consistency" | "reference";
   total: number;
   completed: number;
   currentName?: string;
@@ -666,13 +830,22 @@ export function App() {
   const [isDiagnosingAi, setIsDiagnosingAi] = useState(false);
   const [aiConnectionDiagnostic, setAiConnectionDiagnostic] = useState<AiConnectionDiagnostic>();
   const [isAiTuning, setIsAiTuning] = useState(false);
-  const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AiPendingSuggestion>();
+  const [aiPendingSuggestions, setAiPendingSuggestions] = useState<AiPendingSuggestion[]>([]);
+  const [selectedAiSuggestionId, setSelectedAiSuggestionId] = useState<string>();
+  const [aiCandidateStrength, setAiCandidateStrength] = useState(100);
+  const [aiAdjustedPreview, setAiAdjustedPreview] = useState<string>();
+  const [isAiPreviewRendering, setIsAiPreviewRendering] = useState(false);
   const [aiPanelMessage, setAiPanelMessage] = useState("");
+  const [saveAiStyleAsPreset, setSaveAiStyleAsPreset] = useState(false);
+  const [aiStylePresetName, setAiStylePresetName] = useState("");
   const [batchProcessProgress, setBatchProcessProgress] = useState<BatchProcessProgress>();
   const [cropDraft, setCropDraft] = useState<CropDraft>();
   const [cropBasePreview, setCropBasePreview] = useState<string>();
   const photoImportInputRef = useRef<HTMLInputElement>(null);
+  const referencePhotoInputRef = useRef<HTMLInputElement>(null);
+  const pendingReferenceFileResolveRef = useRef<((file?: File) => void)>();
   const cropBaseImageRef = useRef<HTMLImageElement>(null);
+  const compareViewRef = useRef<HTMLDivElement>(null);
   const exportCancelRef = useRef(false);
   const exportAbortControllerRef = useRef<AbortController>();
   const browserExportDirectoryRef = useRef<FileSystemDirectoryHandle>();
@@ -683,10 +856,22 @@ export function App() {
   const previewRenderJobRef = useRef(0);
   const originalPreviewCacheRef = useRef<Map<string, string>>(new Map());
   const cropInteractionRef = useRef<CropInteraction>();
+  const compareDragRef = useRef<CompareDrag>();
 
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedId) ?? assets[0],
     [assets, selectedId]
+  );
+  const currentAiSuggestions = useMemo(
+    () => (selectedAsset ? aiPendingSuggestions.filter((suggestion) => suggestion.assetId === selectedAsset.id) : []),
+    [aiPendingSuggestions, selectedAsset?.id]
+  );
+  const selectedAiSuggestion = useMemo(
+    () =>
+      selectedAsset
+        ? currentAiSuggestions.find((suggestion) => suggestion.id === selectedAiSuggestionId) ?? currentAiSuggestions[0]
+        : undefined,
+    [currentAiSuggestions, selectedAiSuggestionId, selectedAsset]
   );
   const batchTargets = useMemo(
     () => (batchSelection.size > 0 ? assets.filter((asset) => batchSelection.has(asset.id)) : assets),
@@ -707,14 +892,14 @@ export function App() {
   const rawBatchSkipCount = batchTargets.length - editableBatchTargets.length;
   const previewBatchSkipCount = batchTargets.length - previewEditableBatchTargets.length;
   const isBatchProcessing = batchProcessProgress?.running ?? false;
-  const rawDisabledReason = "RAW 已进入项目模型；当前阶段可查看内嵌预览、运行 AI 候选、做预览级手动调色并导出预览级 JPG；完整 RAW 显影和 RAW 输出仍在最后阶段。";
+  const rawDisabledReason = "该 RAW 暂无可用预览，请导入 JPG 或含预览的 RAW。";
   const rawAiDisabledReason = selectedAssetRawAiCapable
-    ? "将使用 RAW 内嵌 JPEG 预览运行 AI，结果可作为候选参数保存；这还不是完整 RAW 显影。"
-    : "该 RAW 暂无可用内嵌 JPEG 预览，AI 需要可见预览图后才能运行。";
+    ? "将基于当前可见预览运行 AI。"
+    : "该 RAW 暂无可用预览，AI 需要可见图片后才能运行。";
   const rawExportDisabledReason = selectedAssetRawAiCapable
-    ? "将从 RAW 内嵌 JPEG 预览导出 JPG；这不是完整 RAW 显影导出。"
-    : "该 RAW 暂无可用内嵌 JPEG 预览，不能导出预览级 JPG。";
-  const rawActionTitle = selectedAsset && !selectedAssetEditable ? rawDisabledReason : undefined;
+    ? "将导出当前可见预览。"
+    : "该 RAW 暂无可用预览，不能导出 JPG。";
+  const rawActionTitle = selectedAsset && !selectedAssetPreviewEditable ? rawDisabledReason : undefined;
   const aiActionTitle =
     selectedAsset && !selectedAssetEditable ? (selectedAssetAiCapable ? rawAiDisabledReason : rawAiDisabledReason) : undefined;
   const referenceActionTitle =
@@ -727,6 +912,16 @@ export function App() {
       : "导出当前图片";
   const toggleGroup = (group: EditGroupKey) => {
     setOpenGroups((current) => ({ ...current, [group]: !current[group] }));
+  };
+
+  const clearAiSuggestions = () => {
+    setAiPendingSuggestions([]);
+    setSelectedAiSuggestionId(undefined);
+    setAiCandidateStrength(100);
+    setAiAdjustedPreview(undefined);
+    setIsAiPreviewRendering(false);
+    setSaveAiStyleAsPreset(false);
+    setAiStylePresetName("");
   };
 
   useEffect(() => {
@@ -772,7 +967,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setAiPendingSuggestion(undefined);
+    clearAiSuggestions();
   }, [selectedId]);
 
   const getControlValue = (control: EditControl) => {
@@ -793,9 +988,10 @@ export function App() {
       setOriginalPreview(undefined);
       return;
     }
+    const compareOriginalEdits = createCompareOriginalEdits(selectedAsset.edits);
     if (!selectedAsset.isEditable) {
-      setOriginalPreview(selectedAsset.previewUrl);
       if (selectedAsset.previewKind !== "raw_embedded" || valuesAreEqual(selectedAsset.edits, createDefaultEditParams())) {
+        setOriginalPreview(selectedAsset.previewUrl);
         setEditedPreview(undefined);
         setIsRendering(false);
         return;
@@ -808,13 +1004,23 @@ export function App() {
       const timer = window.setTimeout(() => {
         if (cancelled || previewRenderJobRef.current !== renderJobId) return;
         setIsRendering(true);
-        renderImageSourceWithEdits(selectedAsset.previewUrl, selectedAsset.edits, {
-          maxEdge: 1200,
-          quality: 0.86,
-          signal: abortController.signal
-        })
-          .then((preview) => {
-            if (!cancelled && previewRenderJobRef.current === renderJobId) setEditedPreview(preview);
+        Promise.all([
+          renderImageSourceWithEdits(selectedAsset.previewUrl, selectedAsset.edits, {
+            maxEdge: 1200,
+            quality: 0.86,
+            signal: abortController.signal
+          }),
+          renderImageSourceWithEdits(selectedAsset.previewUrl, compareOriginalEdits, {
+            maxEdge: 1200,
+            quality: 0.86,
+            signal: abortController.signal
+          })
+        ])
+          .then(([preview, original]) => {
+            if (!cancelled && previewRenderJobRef.current === renderJobId) {
+              setEditedPreview(preview);
+              setOriginalPreview(original);
+            }
           })
           .catch((error) => {
             if (!cancelled && !(error instanceof DOMException && error.name === "AbortError")) {
@@ -839,17 +1045,28 @@ export function App() {
     const timer = window.setTimeout(() => {
       if (cancelled || previewRenderJobRef.current !== renderJobId) return;
       setIsRendering(true);
-      const cachedOriginalPreview = originalPreviewCacheRef.current.get(selectedAsset.id);
+      const originalCacheKey = [
+        selectedAsset.id,
+        compareOriginalEdits.rotation,
+        compareOriginalEdits.cropAspect,
+        compareOriginalEdits.cropX,
+        compareOriginalEdits.cropY,
+        compareOriginalEdits.cropWidth,
+        compareOriginalEdits.cropHeight
+      ].join(":");
+      const cachedOriginalPreview = originalPreviewCacheRef.current.get(originalCacheKey);
       const originalPreviewPromise = cachedOriginalPreview
         ? Promise.resolve(cachedOriginalPreview)
-        : renderPreviewWithWorkerFallback(selectedAsset, createDefaultEditParams(), {
+        : renderPreviewWithWorkerFallback(selectedAsset, compareOriginalEdits, {
+            maxEdge: 1200,
             signal: abortController.signal
           }).then((original) => {
-            originalPreviewCacheRef.current.set(selectedAsset.id, original);
+            originalPreviewCacheRef.current.set(originalCacheKey, original);
             return original;
           });
       Promise.all([
         renderPreviewWithWorkerFallback(selectedAsset, selectedAsset.edits, {
+          maxEdge: 1200,
           signal: abortController.signal
         }),
         originalPreviewPromise
@@ -878,9 +1095,10 @@ export function App() {
   }, [selectedAsset]);
 
   useEffect(() => {
-    setAiPendingSuggestion(undefined);
+    clearAiSuggestions();
     editDraftRef.current = undefined;
     cropInteractionRef.current = undefined;
+    compareDragRef.current = undefined;
     setCropDraft(undefined);
     setCropBasePreview(undefined);
   }, [selectedAsset?.id]);
@@ -1034,6 +1252,12 @@ export function App() {
     event.target.value = "";
   };
 
+  const handleReferenceFileInput = (event: ChangeEvent<HTMLInputElement>) => {
+    pendingReferenceFileResolveRef.current?.(event.target.files?.[0]);
+    pendingReferenceFileResolveRef.current = undefined;
+    event.target.value = "";
+  };
+
   const importDesktopPhotoPaths = async (filePaths: string[]) => {
     if (filePaths.length === 0) return;
     const supportedPaths = filePaths.filter(isSupportedDesktopPhotoPath);
@@ -1112,6 +1336,23 @@ export function App() {
       setIsDragActive(false);
       setStatus(error instanceof Error ? error.message : "选择照片文件失败");
     }
+  };
+
+  const chooseReferencePhotoFile = async (): Promise<File | undefined> => {
+    if (isTauriRuntime()) {
+      const filePath = await chooseReferencePhotoFilePath();
+      if (!filePath) return undefined;
+      if (!isSupportedDesktopPhotoPath(filePath)) throw new Error("参考图仅支持 JPG/JPEG、Sony ARW、Nikon NEF");
+      const [photo] = await readPhotoFiles([filePath]);
+      if (!photo) throw new Error("参考图读取失败");
+      return desktopPhotoPayloadToFile(photo);
+    }
+
+    if (!referencePhotoInputRef.current) return undefined;
+    return new Promise<File | undefined>((resolve) => {
+      pendingReferenceFileResolveRef.current = resolve;
+      referencePhotoInputRef.current?.click();
+    });
   };
 
   useEffect(() => {
@@ -1200,7 +1441,7 @@ export function App() {
     });
     if (selectedId === assetId) setSelectedId(nextAssets[0]?.id);
     if (referenceStyle?.assetId === assetId) setReferenceStyle(undefined);
-    if (aiPendingSuggestion?.assetId === assetId) setAiPendingSuggestion(undefined);
+    if (aiPendingSuggestions.some((suggestion) => suggestion.assetId === assetId)) clearAiSuggestions();
     setStatus(`已移除图片：${removed.name}`);
   };
 
@@ -1215,7 +1456,7 @@ export function App() {
     setReferenceStyle(undefined);
     setBatchConsistencySummary(undefined);
     setBatchConsistencyPreview(undefined);
-    setAiPendingSuggestion(undefined);
+    clearAiSuggestions();
     setStatus("已清空当前项目图片，原图文件未被修改");
   };
 
@@ -1296,19 +1537,6 @@ export function App() {
           const analysis = await analyzeAssetForAi(asset);
           const result = createAutoEdit(asset, analysis);
           next.push({ ...asset, edits: result.edits, autoSummary: result.summary });
-        } else if (previous.mode === "aiAuto" || previous.mode === "aiStyle") {
-          if (previous.mode === "aiStyle" && !referenceStyle) throw new Error("参考风格已不存在");
-          const mode: AiTuningMode = previous.mode === "aiStyle" ? "styleMatch" : "autoColor";
-          const result = await createLocalAiCandidate(asset, mode, aiInstruction, mode === "styleMatch" ? referenceStyle : undefined);
-          const edits = normalizeAiSuggestionParams(asset.edits, result);
-          next.push({
-            ...asset,
-            edits,
-            autoSummary: [
-              previous.mode === "aiStyle" ? "已重试批量 AI 追色" : "已重试批量 AI 调色",
-              result.summary
-            ]
-          });
         } else {
           const edits = await createReferenceEdit(asset, referenceStyle as ReferenceStyle);
           next.push({
@@ -1469,7 +1697,7 @@ export function App() {
     const analysis = await analyzeAssetForAi(selectedAsset);
     const result = createAutoEdit(selectedAsset, analysis);
     commitSelectedEdits(result.edits, result.summary);
-    setStatus(selectedAsset.isEditable ? "已生成本地自动调色参数" : "已基于 RAW 内嵌预览生成本地自动调色参数");
+    setStatus(selectedAsset.isEditable ? "已生成本地自动调色参数" : "已基于 RAW 当前预览生成本地自动调色参数");
   };
 
   const runBatchAutoColor = async () => {
@@ -1763,6 +1991,29 @@ export function App() {
     throw new Error("该 RAW 暂无可用内嵌预览，无法生成 AI 请求图");
   };
 
+  const prepareReferenceStyleFromFile = async (file: File): Promise<{ asset: PhotoAsset; style: ReferenceStyle }> => {
+    if (!isSupportedPhotoFile(file)) throw new Error("参考图仅支持 JPG/JPEG、Sony ARW、Nikon NEF");
+    const asset = await importPhotoFile(file);
+    try {
+      if (!asset.isEditable && asset.previewKind !== "raw_embedded") {
+        throw new Error("参考 RAW 暂无可用内嵌预览，无法用于 AI 追色");
+      }
+      const analysis = await analyzeAssetForAi(asset);
+      return {
+        asset,
+        style: {
+          assetId: asset.id,
+          name: asset.name,
+          edits: asset.edits,
+          signature: createReferenceColorSignature(analysis, asset.edits)
+        }
+      };
+    } catch (error) {
+      releaseAssetObjectUrls([asset]);
+      throw error;
+    }
+  };
+
   const renderAssetAiCandidatePreview = async (asset: PhotoAsset, edits: EditParams) => {
     if (asset.isEditable) {
       return renderPreviewWithWorkerFallback(asset, edits, {
@@ -1812,9 +2063,82 @@ export function App() {
     });
   };
 
+  const enhanceAiInstruction = (
+    instruction: string,
+    mode: AiTuningMode,
+    analysis?: AutoAnalysis,
+    reference?: ReferenceStyle
+  ) => {
+    const raw = instruction.trim();
+    const text = raw.toLowerCase();
+    const hasAny = (words: string[]) => words.some((word) => text.includes(word));
+    const additions: string[] = [];
+
+    if (!raw) {
+      additions.push("用户没有明确风格词，请根据照片内容做自然、专业、通透、不过度的基础调色");
+    }
+    if (raw.length > 0 && raw.length <= 12) {
+      additions.push("用户描述较笼统，请先判断照片主体、光线和场景，再把想法转成具体调色参数");
+    }
+    if (hasAny(["自然", "真实", "舒服", "好看", "正常"])) {
+      additions.push("保持真实肤色和自然白平衡，避免高饱和、重 HDR、过度锐化和明显滤镜感");
+    }
+    if (hasAny(["通透", "清透", "干净", "空气", "明亮", "清新"])) {
+      additions.push("优先去灰雾、打开中间调和远景层次，保护高光白场，增强局部对比但避免过锐、过饱和和色彩断层");
+    }
+    if (hasAny(["电影", "电影感", "cinematic", "氛围", "故事"])) {
+      additions.push("做克制电影感：略压黑位与高光、控制饱和、保留肤色，允许少量暗角和颗粒");
+    }
+    if (hasAny(["胶片", "film", "复古", "日系", "港风", "颗粒"])) {
+      additions.push("优先使用柔和对比、轻微色偏和颗粒建立风格，不要破坏主体清晰度");
+    }
+    if (hasAny(["人像", "肤色", "皮肤", "脸", "portrait", "skin"])) {
+      additions.push("肤色优先自然健康，保护红橙色相，轻微柔化皮肤纹理，不要磨成塑料感");
+    }
+    if (hasAny(["风景", "风光", "天空", "山", "海", "森林"])) {
+      additions.push("保护天空高光和远景层次，增强自然色彩与局部通透度，避免绿色和蓝色溢出");
+    }
+    if (hasAny(["建筑", "室内", "空间", "房间", "酒店"])) {
+      additions.push("校正偏色，控制窗户和灯光高光，保持墙面中性和线条清晰");
+    }
+    if (hasAny(["夜景", "霓虹", "城市", "街拍"])) {
+      additions.push("压住过亮灯牌，保留霓虹色彩，增加阴影质感但不要让主体死黑");
+    }
+    if (hasAny(["暖", "夕阳", "金色"])) {
+      additions.push("整体可略暖，但肤色和白色区域不能明显发黄");
+    }
+    if (hasAny(["冷", "清冷", "蓝调"])) {
+      additions.push("阴影可偏冷，肤色和主体高光仍需保持可信");
+    }
+    if (analysis) {
+      if (analysis.averageLuma < 86) additions.push("画面偏暗，优先提亮主体和阴影，谨慎拉高黑位");
+      if (analysis.averageLuma > 178) additions.push("画面偏亮，优先保护高光和白场层次");
+      if (analysis.lumaStdDev < 48) additions.push("画面亮度层次偏平，优先提升通透度、去灰雾和中间调局部对比");
+      if (analysis.highlightRatio > 0.08) additions.push("高光区域较多，通透处理必须压住白场，避免亮部断层");
+      if (analysis.skinLikeRatio > 0.04) additions.push("检测到人像肤色候选，肤色保护权重需要高于整体风格化");
+      if (Math.abs(analysis.warmBias) > 0.18) additions.push("画面已有明显冷暖偏向，调整色温时避免二次过偏");
+    }
+    if (mode === "styleMatch") {
+      additions.push(
+        reference
+          ? `追色目标是接近参考风格“${reference.name}”的整体明度、对比、色彩倾向和氛围，但不要机械复制导致当前照片失真`
+          : "追色时优先匹配参考图整体色彩和影调，同时保留当前照片主体自然观感"
+      );
+    }
+
+    const enhanced = compactInstruction([
+      raw ? `用户原始想法：${raw}` : undefined,
+      `增强后的执行要求：${additions.join("；")}`,
+      "输出参数必须保守、可回退、适合摄影后期；如果风格与照片内容冲突，优先保证自然可信"
+      + "；默认目标包含通透、干净、去灰和层次清晰，但禁止用高饱和或硬锐化代替通透"
+    ]);
+    return enhanced.slice(0, 700);
+  };
+
   const parseLocalAiIntent = (instruction: string, mode: AiTuningMode): LocalAiIntent => {
     const text = instruction.toLowerCase();
     const hasAny = (words: string[]) => words.some((word) => text.includes(word));
+    const wantsAiry = hasAny(["通透", "明亮", "干净", "清新", "airy", "清透", "去灰", "透亮"]);
     return {
       warmth:
         (hasAny(["暖", "warm", "金色", "夕阳"]) ? 1 : 0) -
@@ -1826,7 +2150,7 @@ export function App() {
         (hasAny(["鲜艳", "高饱和", "colorful", "浓郁"]) ? 1 : 0) -
         (hasAny(["低饱和", "淡", "清淡", "muted", "film"]) ? 1 : 0),
       highlightProtection: hasAny(["压高光", "高光", "不过曝", "highlight", "天空", "白纱"]) ? 1 : 0,
-      airy: hasAny(["通透", "明亮", "干净", "清新", "airy"]) ? 1 : 0,
+      airy: wantsAiry ? 1 : text.trim() ? 0.35 : 0.65,
       film: hasAny(["胶片", "film", "复古", "颗粒", "cinematic", "电影"]) ? 1 : 0,
       portrait: mode === "autoColor" && hasAny(["人像", "肤色", "皮肤", "磨皮", "美齿", "portrait", "skin"]) ? 1 : 0
     };
@@ -1840,10 +2164,15 @@ export function App() {
       contrast: clamp(base.contrast + intent.contrast * 5 - intent.film * 3, -50, 50),
       highlights: clamp(base.highlights - intent.highlightProtection * 10 - intent.airy * 3, -60, 40),
       shadows: clamp(base.shadows + intent.airy * 5 + intent.film * 2, -40, 60),
+      whites: clamp(base.whites + intent.airy * 5, -40, 40),
+      blacks: clamp(base.blacks - intent.airy * 4 + intent.film * 2, -40, 40),
       saturation: clamp(base.saturation + intent.saturation * 6 - intent.film * 4, -50, 50),
       vibrance: clamp(base.vibrance + intent.saturation * 5 + intent.airy * 3 + (hasPortrait ? 3 : 0), -50, 50),
-      clarity: clamp(base.clarity + intent.contrast * 2 - (hasPortrait ? 2 : 0), -50, 50),
-      texture: clamp(base.texture - (hasPortrait ? 4 : 0) - intent.film * 2, -50, 50),
+      transparency: clamp(base.transparency + intent.airy * (hasPortrait ? 12 : 20) + intent.contrast * 4, 0, 100),
+      clarity: clamp(base.clarity + intent.contrast * 2 + intent.airy * (hasPortrait ? 1 : 4) - (hasPortrait ? 2 : 0), -50, 50),
+      texture: clamp(base.texture + intent.airy * (hasPortrait ? 0 : 3) - (hasPortrait ? 4 : 0) - intent.film * 2, -50, 50),
+      dehaze: clamp(base.dehaze + intent.airy * (hasPortrait ? 4 : 9) + intent.contrast * 2, -50, 50),
+      sharpness: clamp(base.sharpness + intent.airy * (hasPortrait ? 2 : 5), 0, 40),
       grain: clamp(base.grain + intent.film * 10, 0, 50),
       skinProtection: clamp(Math.max(base.skinProtection, hasPortrait ? 84 : base.skinProtection), 0, 100),
       skinSmoothing: clamp(base.skinSmoothing + (hasPortrait ? 14 + intent.portrait * 10 : 0), 0, 100),
@@ -1861,19 +2190,107 @@ export function App() {
     reference?: ReferenceStyle
   ): Promise<AiTuningResult> => {
     const analysis = await analyzeAssetForAi(asset);
-    const intent = parseLocalAiIntent(instruction, mode);
+    const enhancedInstruction = enhanceAiInstruction(instruction, mode, analysis, reference);
+    const intent = parseLocalAiIntent(enhancedInstruction, mode);
     const base =
       mode === "styleMatch" && reference
         ? await createReferenceEdit(asset, reference)
         : createAutoEdit(asset, analysis).edits;
     const params = applyLocalAiIntent(base, analysis, intent, mode);
     const modeLabel = mode === "styleMatch" ? "本地追色候选" : "本地调色候选";
-    const rawNote = asset.previewKind === "raw_embedded" ? "RAW 内嵌预览级，" : "";
+    const rawNote = asset.previewKind === "raw_embedded" ? "RAW 当前预览，" : "";
     return {
       model: "local-color-science",
-      summary: `${modeLabel}：${rawNote}基于图像统计、相机信息、参考风格和调色想法生成，可批量应用。`,
+      summary: `${modeLabel}：${rawNote}已增强用户调色想法，并基于图像统计、相机信息和参考风格生成，可保存为预设后复用。`,
       params
     };
+  };
+
+  const createAiSuggestionVariants = (baseline: EditParams, primary: EditParams, mode: AiTuningMode, summary: string) => {
+  const isStyleMatch = mode === "styleMatch";
+  const natural = mergeEditParams(blendAiEditParams(baseline, primary, 72), {
+    contrast: clamp(primary.contrast - 3, -50, 50),
+    saturation: clamp(primary.saturation - 5, -50, 50),
+    vibrance: clamp(primary.vibrance - 4, -50, 50),
+    transparency: clamp(primary.transparency + 4, 0, 100),
+    clarity: clamp(primary.clarity - 2, -50, 50),
+    skinProtection: clamp(Math.max(primary.skinProtection, 82), 0, 100)
+  });
+    const expressive = mergeEditParams(scaleAiEditParams(baseline, primary, 1.06), {
+      contrast: clamp(primary.contrast + 3, -50, 50),
+      saturation: clamp(primary.saturation + 2, -50, 50),
+      vibrance: clamp(primary.vibrance + 4, -50, 50),
+      transparency: clamp(primary.transparency + 8, 0, 100),
+      clarity: clamp(primary.clarity + 3, -50, 50),
+      dehaze: clamp(primary.dehaze + 4, -50, 50),
+      vignette: clamp(primary.vignette + 4, -50, 50),
+      grain: clamp(primary.grain + 3, 0, 50)
+    });
+    const cleanDetail = mergeEditParams(primary, {
+      exposure: clamp(primary.exposure + 2, -50, 50),
+      highlights: clamp(primary.highlights - 8, -60, 40),
+      shadows: clamp(primary.shadows + 8, -40, 60),
+      saturation: clamp(primary.saturation - 4, -50, 50),
+      vibrance: clamp(primary.vibrance - 2, -50, 50),
+      transparency: clamp(primary.transparency + 16, 0, 100),
+      clarity: clamp(primary.clarity + 6, -50, 50),
+      texture: clamp(primary.texture + 5, -50, 50),
+      dehaze: clamp(primary.dehaze + 8, -50, 50),
+      noiseReduction: clamp(primary.noiseReduction + 4, 0, 40),
+      skinProtection: clamp(Math.max(primary.skinProtection, 78), 0, 100)
+    });
+
+    return [
+      {
+        idSuffix: "natural",
+        label: isStyleMatch ? "方案 A · 稳妥追色" : "方案 A · 自然校正",
+        summary: `${summary}（自然版：更保守，优先真实肤色和不过度。）`,
+        params: makeAiParamsGamutSafe(baseline, natural)
+      },
+      {
+        idSuffix: "expressive",
+        label: isStyleMatch ? "方案 B · 强化追色" : "方案 B · 风格增强",
+        summary: `${summary}（增强版：色彩和氛围更明显，适合想要更有风格的结果。）`,
+        params: makeAiParamsGamutSafe(baseline, expressive)
+      },
+      {
+        idSuffix: "clean-detail",
+        label: isStyleMatch ? "方案 C · 通透追色" : "方案 C · 通透细节",
+        summary: `${summary}（通透版：更重视高光保护、阴影层次和细节清晰。）`,
+        params: makeAiParamsGamutSafe(baseline, cleanDetail)
+      }
+    ];
+  };
+
+  const createAiSuggestionSet = async (
+    asset: PhotoAsset,
+    mode: AiTuningMode,
+    result: AiTuningResult,
+    fallbackHint: string
+  ): Promise<AiPendingSuggestion[]> => {
+    const primary = normalizeAiSuggestionParams(asset.edits, result);
+    const variants = createAiSuggestionVariants(asset.edits, primary, mode, result.summary);
+    const createdAt = Date.now();
+    const suggestions: AiPendingSuggestion[] = [];
+
+    for (const variant of variants) {
+      await yieldToUi();
+      const previewUrl = await renderAssetAiCandidatePreview(asset, variant.params);
+      suggestions.push({
+        id: `${asset.id}-${createdAt}-${variant.idSuffix}`,
+        mode,
+        assetId: asset.id,
+        assetName: asset.name,
+        label: variant.label,
+        model: result.model,
+        summary: variant.summary,
+        fallbackHint,
+        params: variant.params,
+        previewUrl
+      });
+    }
+
+    return suggestions;
   };
 
   const applyReferenceToSelected = async () => {
@@ -1964,6 +2381,8 @@ export function App() {
     const analysisLine = analysis
       ? [
           `平均亮度 ${formatAiNumber(analysis.averageLuma, 1)}/255`,
+          `亮度离散 ${formatAiNumber(analysis.lumaStdDev, 1)}`,
+          `暗部/高光占比 ${(analysis.shadowRatio * 100).toFixed(1)}% / ${(analysis.highlightRatio * 100).toFixed(1)}%`,
           `红/绿/蓝均衡 ${formatAiNumber(analysis.redBalance)} / ${formatAiNumber(analysis.greenBalance)} / ${formatAiNumber(analysis.blueBalance)}`,
           `暖色偏 ${formatAiNumber(analysis.warmBias)}`,
           `绿偏 ${formatAiNumber(greenBias)}`,
@@ -2096,31 +2515,44 @@ export function App() {
       setAiPanelMessage(selectedAsset ? rawAiDisabledReason : "请先导入可用图片");
       return;
     }
-    if (mode === "styleMatch" && !referenceStyle) {
-      setAiPanelMessage("请先在参考风格中设置参考图，再运行 AI 追色");
-      return;
+
+    let referenceAsset: PhotoAsset | undefined;
+    let activeReferenceStyle: ReferenceStyle | undefined;
+    if (mode === "styleMatch") {
+      try {
+        setAiPanelMessage("请选择一张参考图用于 AI 追色");
+        const referenceFile = await chooseReferencePhotoFile();
+        if (!referenceFile) {
+          setAiPanelMessage("未选择参考图，AI 追色已取消");
+          return;
+        }
+        setAiPanelMessage(`正在读取参考图：${referenceFile.name}`);
+        const preparedReference = await prepareReferenceStyleFromFile(referenceFile);
+        referenceAsset = preparedReference.asset;
+        activeReferenceStyle = preparedReference.style;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "参考图读取失败，AI 追色已取消";
+        setAiPanelMessage(message);
+        setStatus(message);
+        return;
+      }
     }
-    const referenceAsset =
-      mode === "styleMatch" && referenceStyle
-        ? assets.find((asset) => asset.id === referenceStyle.assetId && (asset.isEditable || asset.previewKind === "raw_embedded"))
-        : undefined;
-    const isReferenceImageAvailable = Boolean(referenceAsset);
 
     setIsAiTuning(true);
-    setAiPendingSuggestion(undefined);
+    clearAiSuggestions();
     const modeText = mode === "styleMatch" ? "AI 追色" : "AI 调色";
-    setAiPanelMessage(
-      mode === "styleMatch" && !isReferenceImageAvailable
-        ? "正在生成 AI 追色候选；参考原图不在当前项目中，将使用已保存的参考参数和色彩签名"
-        : `正在生成${modeText}候选`
-    );
+    if (activeReferenceStyle) {
+      setAiStylePresetName(`${activeReferenceStyle.name.replace(/\.[^.]+$/, "")} 追色`);
+    }
+    setAiPanelMessage(`AI 正在生成 3 套${modeText}方案，期间仍可继续浏览和手动编辑`);
     setStatus(`正在运行${modeText}：${selectedAsset.name}`);
     try {
+      await yieldToUi();
       const localResult = await createLocalAiCandidate(
         selectedAsset,
         mode,
         aiInstruction,
-        mode === "styleMatch" ? referenceStyle : undefined
+        activeReferenceStyle
       );
       let result: AiTuningResult = localResult;
       let fallbackReason = "";
@@ -2130,26 +2562,32 @@ export function App() {
         try {
           const analysis = await analyzeAssetForAi(selectedAsset);
           const localAuto = createAutoEdit(selectedAsset, analysis);
+          const enhancedInstruction = enhanceAiInstruction(
+            aiInstruction,
+            mode,
+            analysis,
+            activeReferenceStyle
+          );
           const imageDataUrl = await renderAssetForAiRequest(selectedAsset, createDefaultEditParams());
           const referenceDataUrl =
-            referenceAsset && referenceStyle
-              ? await renderAssetForAiRequest(referenceAsset, referenceStyle.edits)
+            referenceAsset && activeReferenceStyle
+              ? await renderAssetForAiRequest(referenceAsset, activeReferenceStyle.edits)
               : undefined;
           const remoteResult = await tunePhotoWithAi({
             mode,
             assetName: selectedAsset.name,
             cameraSummary: [
-              getCameraSummary(selectedAsset, analysis, localAuto, mode === "styleMatch" ? referenceStyle : undefined),
+              getCameraSummary(selectedAsset, analysis, localAuto, activeReferenceStyle),
               "请把本地色彩科学候选作为基线，只返回需要调整的安全增量；不要重写为极端风格。",
-              mode === "styleMatch" && !isReferenceImageAvailable
-                ? "参考图原始文件当前不可用：请基于已保存的参考风格参数、色彩签名和用户调色想法给出保守追色建议。"
+              mode === "styleMatch" && !referenceDataUrl
+                ? "参考图预览当前不可用：请基于参考风格参数、色彩签名和用户调色想法给出保守追色建议。"
                 : undefined
             ]
               .filter(Boolean)
               .join("\n"),
             imageDataUrl,
             referenceDataUrl,
-            userInstruction: aiInstruction.trim() || undefined,
+            userInstruction: enhancedInstruction,
             currentParams: normalizeAiSuggestionParams(selectedAsset.edits, localResult)
           });
           result = {
@@ -2174,122 +2612,60 @@ export function App() {
           : "下一步：请在 Windows/macOS 桌面版中配置 AI；浏览器预览不会发送远端 AI 请求。";
       }
 
-      const params = normalizeAiSuggestionParams(selectedAsset.edits, result);
-      const previewUrl = await renderAssetAiCandidatePreview(selectedAsset, params);
-      setAiPendingSuggestion({
-        mode,
-        assetId: selectedAsset.id,
-        assetName: selectedAsset.name,
-        model: result.model,
-        summary: result.summary,
-        fallbackHint,
-        params,
-        previewUrl
-      });
+      setAiPanelMessage(`正在渲染 3 套${modeText}大图预览，可继续使用其他功能`);
+      const suggestions = await createAiSuggestionSet(selectedAsset, mode, result, fallbackHint);
+      setAiPendingSuggestions(suggestions);
+      setSelectedAiSuggestionId(suggestions[0]?.id);
+      setAiCandidateStrength(100);
+      setAiAdjustedPreview(suggestions[0]?.previewUrl);
+      if (selectedAssetPreviewEditable) setCompareMode("split");
       setAiPanelMessage(
         fallbackReason
-          ? `${modeText}已生成本地候选：${fallbackReason}，请预览后确认`
+          ? `${modeText}已生成 3 套本地方案：${fallbackReason}，请在大图中预览后确认`
           : selectedAsset.isEditable
-            ? `${modeText}已生成候选结果，请预览后确认`
-            : `${modeText}已基于 RAW 内嵌预览生成候选结果，请预览后确认`
+            ? `${modeText}已生成 3 套方案，请在大图中预览后选择`
+            : `${modeText}已基于 RAW 当前预览生成 3 套方案，请在大图中预览后选择`
       );
-      setStatus(`${modeText} candidate generated; current photo is not changed yet`);
+      setStatus(`${modeText} 候选已生成`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "AI 调色失败，核心功能不受影响";
       setAiPanelMessage(message);
       setStatus(message);
     } finally {
       setIsAiTuning(false);
+      if (referenceAsset) releaseAssetObjectUrls([referenceAsset]);
     }
-  };
-
-  const runBatchAiTuning = async (mode: AiTuningMode) => {
-    if (previewEditableBatchTargets.length === 0) {
-      setAiPanelMessage("没有可批量处理的 JPG 或 RAW 内嵌预览");
-      return;
-    }
-    if (mode === "styleMatch" && !referenceStyle) {
-      setAiPanelMessage("请先在参考风格中设置参考图，再运行批量 AI 追色");
-      return;
-    }
-
-    const modeText = mode === "styleMatch" ? "批量 AI 追色" : "批量 AI 调色";
-    const batchMode: BatchProcessProgress["mode"] = mode === "styleMatch" ? "aiStyle" : "aiAuto";
-    const targetIds = new Set(previewEditableBatchTargets.map((asset) => asset.id));
-    const next: PhotoAsset[] = [];
-    let completed = 0;
-    let failedCount = 0;
-
-    setAiPendingSuggestion(undefined);
-    startBatchProcess(batchMode, previewEditableBatchTargets.length);
-    setAiPanelMessage(`${modeText}使用本地色彩科学候选批量应用，不会逐张请求远端 AI`);
-    setStatus(`正在运行${modeText}：${previewEditableBatchTargets.length} 张 JPG/RAW 预览`);
-
-    for (const asset of assets) {
-      if (!targetIds.has(asset.id)) {
-        next.push(asset);
-        continue;
-      }
-      if (batchProcessCancelRef.current) {
-        next.push(asset);
-        continue;
-      }
-
-      updateBatchProcess(completed, asset.name);
-      try {
-        const result = await createLocalAiCandidate(
-          asset,
-          mode,
-          aiInstruction,
-          mode === "styleMatch" ? referenceStyle : undefined
-        );
-        const edits = normalizeAiSuggestionParams(asset.edits, result);
-        next.push({
-          ...asset,
-          edits,
-          autoSummary: [
-            mode === "styleMatch" ? "已应用批量 AI 追色" : "已应用批量 AI 调色",
-            result.summary,
-            aiInstruction.trim() ? `调色想法：${aiInstruction.trim()}` : "调色想法：本地自动判断"
-          ]
-        });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : `${modeText}失败`;
-        failedCount += 1;
-        recordBatchFailure(asset, reason);
-        next.push({ ...asset, autoSummary: [`${modeText}失败：${reason}`] });
-      }
-
-      completed += 1;
-      updateBatchProcess(completed, asset.name);
-      await yieldToUi();
-    }
-
-    setAssets(next);
-    finishBatchProcess();
-    setAiPanelMessage(
-      `${modeText}完成 ${previewEditableBatchTargets.length - failedCount}/${previewEditableBatchTargets.length}${failedCount > 0 ? `，失败 ${failedCount}` : ""}`
-    );
-    setStatus(
-      batchProcessCancelRef.current
-        ? `${modeText} cancelled, completed ${completed}/${previewEditableBatchTargets.length}`
-        : `${modeText} completed ${previewEditableBatchTargets.length - failedCount}/${previewEditableBatchTargets.length} JPG/RAW preview${failedCount > 0 ? `, failed ${failedCount}` : ""}${previewBatchSkipCount > 0 ? `, skipped unavailable RAW ${previewBatchSkipCount}` : ""}`
-    );
   };
 
   const applyAiSuggestion = () => {
-    if (!selectedAsset || !aiPendingSuggestion || aiPendingSuggestion.assetId !== selectedAsset.id) return;
-    commitSelectedEdits(aiPendingSuggestion.params);
-    setAiPanelMessage("AI 候选参数已应用");
-    setStatus(`已应用 AI 候选参数：${selectedAsset.name}`);
-    setAiPendingSuggestion(undefined);
+    if (!selectedAsset || !selectedAiSuggestion || selectedAiSuggestion.assetId !== selectedAsset.id) return;
+    const params = blendAiEditParams(selectedAsset.edits, selectedAiSuggestion.params, aiCandidateStrength);
+    let savedPresetName = "";
+    if (selectedAiSuggestion.mode === "styleMatch" && saveAiStyleAsPreset) {
+      savedPresetName = aiStylePresetName.trim() || `AI 追色 ${customPresets.length + 1}`;
+      const preset: Preset = {
+        id: `custom-ai-style-${Date.now()}`,
+        name: savedPresetName,
+        description: `${selectedAiSuggestion.label} · ${aiCandidateStrength}%`,
+        params
+      };
+      setCustomPresets((current) => [preset, ...current].slice(0, 30));
+    }
+    commitSelectedEdits(params);
+    setAiPanelMessage(
+      savedPresetName
+        ? `已应用 ${selectedAiSuggestion.label} · ${aiCandidateStrength}%，并保存为自定义预设：${savedPresetName}`
+        : `已应用 ${selectedAiSuggestion.label} · ${aiCandidateStrength}%`
+    );
+    setStatus("AI 候选已应用");
+    clearAiSuggestions();
   };
 
   const cancelAiSuggestion = () => {
-    if (aiPendingSuggestion) {
+    if (selectedAiSuggestion) {
       setAiPanelMessage("已取消 AI 候选结果，当前参数未改变");
-      setStatus("已取消 AI 候选结果");
-      setAiPendingSuggestion(undefined);
+      setStatus("AI 候选已取消");
+      clearAiSuggestions();
     }
   };
 
@@ -2350,6 +2726,35 @@ export function App() {
       x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
       y: clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100)
     };
+  };
+
+  const getCompareSplitFromPointer = (event: React.PointerEvent) => {
+    const rect = compareViewRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return compareSplit;
+    return clamp(((event.clientX - rect.left) / rect.width) * 100, 5, 95);
+  };
+
+  const beginCompareDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!canCompare) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    compareDragRef.current = { pointerId: event.pointerId };
+    setCompareSplit(getCompareSplitFromPointer(event));
+  };
+
+  const updateCompareDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (compareDragRef.current?.pointerId !== event.pointerId) return;
+    setCompareSplit(getCompareSplitFromPointer(event));
+  };
+
+  const endCompareDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (compareDragRef.current?.pointerId !== event.pointerId) return;
+    compareDragRef.current = undefined;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be released by the browser.
+    }
   };
 
   const startCropSession = (aspect: CropAspect = selectedAsset?.edits.cropAspect ?? "free") => {
@@ -2557,6 +2962,7 @@ export function App() {
         blacks: 0,
         saturation: 0,
         vibrance: 0,
+        transparency: 0,
         clarity: 0,
         texture: 0,
         dehaze: 0,
@@ -2786,7 +3192,7 @@ export function App() {
     signal?: AbortSignal
   ): Promise<ExportWriteResult> => {
     if (!asset.isEditable && asset.previewKind !== "raw_embedded") {
-      throw new Error("该 RAW 暂无可用内嵌 JPEG 预览，不能导出预览级 JPG");
+      throw new Error("该 RAW 暂无可用预览，不能导出 JPG");
     }
     throwIfExportAborted(signal);
     const renderedUrl = await renderForExport(asset, signal);
@@ -2822,6 +3228,18 @@ export function App() {
     }
   };
 
+  const clearExportHistory = async () => {
+    if (!isTauriRuntime() || exportProgress.running) return;
+    try {
+      await clearExportJobs();
+      setExportHistory([]);
+      setProjectStoreSummary(await getProjectStoreSummary());
+      setStatus("已清空最近导出记录");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "清空导出记录失败");
+    }
+  };
+
   const recordExportHistory = async (job: ExportJobRecord) => {
     if (!isTauriRuntime()) return;
     try {
@@ -2845,16 +3263,16 @@ export function App() {
     if (asset.previewKind === "raw_embedded") {
       const sourceUrl = await createRawEmbeddedSourceUrl(asset.file);
       throwIfExportAborted(signal);
-      if (!sourceUrl) throw new Error("该 RAW 暂无可用内嵌 JPEG 预览，不能导出预览级 JPG");
+      if (!sourceUrl) throw new Error("该 RAW 暂无可用预览，不能导出 JPG");
       return renderImageSourceWithEdits(sourceUrl, asset.edits, {
-      maxEdge: exportSettings.maxEdge,
-      quality: exportSettings.quality / 100,
-      exportSettings,
+        maxEdge: exportSettings.maxEdge,
+        quality: exportSettings.quality / 100,
+        exportSettings,
         signal,
         orientation: asset.metadata.orientation
       });
     }
-    throw new Error("该 RAW 暂无可用内嵌 JPEG 预览，不能导出预览级 JPG");
+    throw new Error("该 RAW 暂无可用预览，不能导出 JPG");
   };
 
   const executeExportQueue = async (
@@ -2906,7 +3324,7 @@ export function App() {
     await executeExportQueue("single", [{ asset: selectedAsset, index: 0 }], outputDir, {
       start: selectedAsset.isEditable
         ? `正在导出 ${selectedAsset.name}${outputDir ? ` 到 ${outputDir}` : ""}`
-        : `正在导出 RAW 内嵌预览级 JPG：${selectedAsset.name}${outputDir ? ` 到 ${outputDir}` : ""}`,
+        : `正在导出 RAW 当前预览：${selectedAsset.name}${outputDir ? ` 到 ${outputDir}` : ""}`,
       item: ({ asset }) => `正在导出 ${asset.name}`,
       cancelled: () => "Export cancelled",
       completed: (result) => {
@@ -2915,7 +3333,7 @@ export function App() {
         if (item?.status === "skipped") return `同名文件已跳过：${item.outputName}`;
         return selectedAsset.isEditable
           ? `已生成当前图片导出文件：${item?.outputName ?? createExportName(selectedAsset, 0)}`
-          : `已生成 RAW 内嵌预览级 JPG：${item?.outputName ?? createExportName(selectedAsset, 0)}`;
+          : `已生成 RAW 当前预览导出文件：${item?.outputName ?? createExportName(selectedAsset, 0)}`;
       }
     });
   };
@@ -2997,7 +3415,7 @@ export function App() {
     return "";
   };
   const formatPreviewKind = (asset: PhotoAsset) => {
-    if (asset.previewKind === "raw_embedded") return "RAW 内嵌预览";
+    if (asset.previewKind === "raw_embedded") return "RAW 可见预览";
     if (asset.previewKind === "raw_placeholder") return "RAW 占位预览";
     return "JPG 预览";
   };
@@ -3105,22 +3523,6 @@ export function App() {
     }
   };
 
-  const saveProjectToDatabase = async () => {
-    if (!isTauriRuntime()) {
-      setStatus("项目库保存仅在桌面模式可用");
-      return;
-    }
-    try {
-      const path = await saveProjectSnapshotToDb(createProjectSnapshot());
-      const [summary, projects] = await Promise.all([getProjectStoreSummary(), listNamedProjectSnapshots()]);
-      setProjectStoreSummary(summary);
-      setNamedProjects(projects);
-      setStatus(`已保存到项目库：${path}，JPG ${summary.jpg_count}，RAW ${summary.raw_count}，编辑 ${summary.edit_count}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "保存项目库失败");
-    }
-  };
-
   const loadProjectFromDatabase = async () => {
     if (!isTauriRuntime()) {
       setStatus("项目库载入仅在桌面模式可用");
@@ -3194,21 +3596,40 @@ export function App() {
     }
   };
 
-  const refreshProjectStoreSummary = async () => {
-    if (!isTauriRuntime()) return;
-    try {
-      const [summary, projects] = await Promise.all([getProjectStoreSummary(), listNamedProjectSnapshots()]);
-      setProjectStoreSummary(summary);
-      setNamedProjects(projects);
-      setStatus(
-        `项目库：资产 ${summary.asset_count}，JPG ${summary.jpg_count}，RAW ${summary.raw_count}，命名项目 ${summary.named_project_count}`
-      );
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "读取项目库统计失败");
+  useEffect(() => {
+    if (!selectedAsset || !selectedAiSuggestion || selectedAiSuggestion.assetId !== selectedAsset.id) {
+      setAiAdjustedPreview(undefined);
+      setIsAiPreviewRendering(false);
+      return;
     }
-  };
+    if (aiCandidateStrength >= 100) {
+      setAiAdjustedPreview(selectedAiSuggestion.previewUrl);
+      setIsAiPreviewRendering(false);
+      return;
+    }
 
-  const editedPreviewSource = selectedAsset ? editedPreview ?? selectedAsset.previewUrl : undefined;
+    let cancelled = false;
+    setIsAiPreviewRendering(true);
+    const params = blendAiEditParams(selectedAsset.edits, selectedAiSuggestion.params, aiCandidateStrength);
+    renderAssetAiCandidatePreview(selectedAsset, params)
+      .then((previewUrl) => {
+        if (!cancelled) setAiAdjustedPreview(previewUrl);
+      })
+      .catch((error) => {
+        if (!cancelled) setAiPanelMessage(error instanceof Error ? error.message : "AI 方案预览渲染失败");
+      })
+      .finally(() => {
+        if (!cancelled) setIsAiPreviewRendering(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAsset, selectedAiSuggestion, aiCandidateStrength]);
+
+  const activeAiPreviewSource =
+    selectedAsset && selectedAiSuggestion?.assetId === selectedAsset.id ? aiAdjustedPreview ?? selectedAiSuggestion.previewUrl : undefined;
+  const editedPreviewSource = selectedAsset ? activeAiPreviewSource ?? editedPreview ?? selectedAsset.previewUrl : undefined;
   const originalPreviewSource = selectedAssetPreviewEditable ? originalPreview : selectedAsset?.previewUrl;
   const cropEditorSource = isCropEditing ? cropBasePreview ?? editedPreviewSource : undefined;
   const previewSource =
@@ -3295,6 +3716,13 @@ export function App() {
               onChange={handleFileInput}
             />
           </label>
+          <input
+            ref={referencePhotoInputRef}
+            className="hidden-file-input"
+            type="file"
+            accept=".jpg,.jpeg,.arw,.nef,image/jpeg"
+            onChange={handleReferenceFileInput}
+          />
         </div>
 
         <div className={`drop-zone${isDragActive ? " active" : ""}`}>
@@ -3344,17 +3772,9 @@ export function App() {
           </button>
           {isTauriRuntime() && (
             <>
-              <button onClick={saveProjectToDatabase} disabled={assets.length === 0}>
-                <Database size={16} />
-                入库
-              </button>
               <button onClick={loadProjectFromDatabase}>
                 <Import size={16} />
                 载入
-              </button>
-              <button onClick={refreshProjectStoreSummary}>
-                <Database size={16} />
-                统计
               </button>
             </>
           )}
@@ -3450,7 +3870,6 @@ export function App() {
 
       <section className="preview-panel">
         <div className="toolbar">
-          <div className="status-line">{status}</div>
           <div className="toolbar-actions">
             <button className="tool-button" title={rawActionTitle} onClick={runAutoColor} disabled={!selectedAssetPreviewEditable || isRendering || isBatchProcessing}>
               <Wand2 size={18} />
@@ -3515,6 +3934,12 @@ export function App() {
         </div>
 
         <div className="image-stage" data-testid="image-stage" onDoubleClick={(event) => event.preventDefault()}>
+          {isAiTuning && (
+            <div className="ai-stage-badge" data-testid="ai-stage-badge">
+              <Loader2 className="spin" size={16} />
+              <span>AI 正在生成 3 套方案，可继续操作</span>
+            </div>
+          )}
           {batchProcessProgress && (
             <div className="batch-process-badge">
               <progress value={batchProcessProgress.completed} max={Math.max(1, batchProcessProgress.total)} />
@@ -3523,11 +3948,7 @@ export function App() {
                   ? "批量自动"
                   : batchProcessProgress.mode === "consistency"
                     ? "统一色彩"
-                    : batchProcessProgress.mode === "aiAuto"
-                      ? "批量 AI 调色"
-                      : batchProcessProgress.mode === "aiStyle"
-                        ? "批量 AI 追色"
-                        : "参考风格"} ·{" "}
+                    : "参考风格"} ·{" "}
                 {batchProcessProgress.completed}/{batchProcessProgress.total}
                 {batchProcessProgress.currentName ? ` · ${batchProcessProgress.currentName}` : ""}
               </span>
@@ -3623,23 +4044,25 @@ export function App() {
                   </div>
                 </div>
               ) : compareMode === "split" && canCompare ? (
-                <div className="compare-view" data-testid="compare-view">
+                <div
+                  ref={compareViewRef}
+                  className="compare-view"
+                  data-testid="compare-view"
+                  onPointerDown={beginCompareDrag}
+                  onPointerMove={updateCompareDrag}
+                  onPointerUp={endCompareDrag}
+                  onPointerCancel={endCompareDrag}
+                >
+                  <img className="compare-sizing-image" src={editedPreviewSource} alt="" aria-hidden="true" />
                   <img className="compare-image compare-original" src={originalPreviewSource} alt={`${selectedAsset?.name ?? "preview"} original`} />
                   <div className="compare-edited-layer" style={{ clipPath: `inset(0 ${100 - compareSplit}% 0 0)` }}>
                     <img className="compare-image" src={editedPreviewSource} alt={`${selectedAsset?.name ?? "preview"} edited`} />
                   </div>
-                  <div className="compare-divider" style={{ left: `${compareSplit}%` }} />
+                  <div className="compare-divider" style={{ left: `${compareSplit}%` }}>
+                    <span />
+                  </div>
                   <span className="compare-label original-label">原图</span>
                   <span className="compare-label edited-label">效果</span>
-                  <input
-                    className="compare-slider"
-                    data-testid="compare-slider"
-                    type="range"
-                    min={5}
-                    max={95}
-                    value={compareSplit}
-                    onChange={(event) => setCompareSplit(Number(event.target.value))}
-                  />
                 </div>
               ) : (
                 <img src={previewSource} alt={selectedAsset?.name ?? "preview"} />
@@ -3703,18 +4126,6 @@ export function App() {
                 ))}
               </section>
             )}
-            {!selectedAsset.isEditable && (
-              <section className="raw-notice">
-                <strong>RAW 已进入项目模型</strong>
-                <span>{rawDisabledReason}</span>
-                <span>
-                  {selectedAssetRawAiCapable
-                    ? "AI 调色/追色、基础滑杆、HSL 和单张导出会使用 RAW 内嵌 JPEG 预览；完整 RAW 显影和 RAW 输出仍按最后阶段接入。"
-                    : "请继续使用 JPG 完成自动调色、参考风格、AI 和导出流程。"}
-                </span>
-              </section>
-            )}
-
             <AccordionSection
               title="基础调色"
               subtitle="曝光、白平衡、明暗和色彩"
@@ -3977,70 +4388,11 @@ export function App() {
             </AccordionSection>
 
             <AccordionSection
-              title="参考风格"
-              subtitle={
-                referenceStyle
-                  ? `${referenceStyle.name} · ${referenceStyle.signature ? "含色彩签名" : "旧版参数"}`
-                  : "先把一张已调好的图片设为参考"
-              }
-              isOpen={openGroups.reference}
-              onToggle={() => toggleGroup("reference")}
-              testId="accordion-reference-trigger"
-            >
-              <section
-                className="reference-panel"
-                data-testid="reference-current-state"
-                data-reference-name={referenceStyle?.name ?? ""}
-                data-reference-has-signature={String(Boolean(referenceStyle?.signature))}
-              >
-              <div className="reference-actions">
-                <button
-                  data-testid="reference-set-current-button"
-                  title={referenceActionTitle}
-                  onClick={setCurrentAsReference}
-                  disabled={!selectedAssetReferenceCapable}
-                >
-                  <Palette size={16} />
-                  设为参考
-                </button>
-                <button
-                  data-testid="reference-apply-current-button"
-                  title={referenceActionTitle}
-                  onClick={applyReferenceToSelected}
-                  disabled={!selectedAssetReferenceCapable || !referenceStyle}
-                >
-                  <Wand2 size={16} />
-                  应用当前
-                </button>
-                <button onClick={applyReferenceToBatch} disabled={previewEditableBatchTargets.length === 0 || !referenceStyle || isBatchProcessing}>
-                  <Sparkles size={16} />
-                  应用批量
-                </button>
-              </div>
-              <label className="strength-control">
-                <span>
-                  参考强度
-                  <strong>{referenceStrength}%</strong>
-                </span>
-                <input
-                  data-testid="reference-strength-range"
-                  type="range"
-                  min={20}
-                  max={100}
-                  step={5}
-                  value={referenceStrength}
-                  onChange={(event) => setReferenceStrength(Number(event.target.value))}
-                  disabled={isBatchProcessing}
-                />
-              </label>
-              </section>
-            </AccordionSection>
-
-            <AccordionSection
               title="AI"
               subtitle={aiSettings.hasApiKey ? `已配置 · ${aiSettings.model}` : "设置后可调色/追色"}
               isOpen={openGroups.ai}
               onToggle={() => toggleGroup("ai")}
+              className="ai-menu-section"
               testId="accordion-ai-trigger"
             >
               <section className="ai-panel">
@@ -4130,7 +4482,6 @@ export function App() {
                     maxLength={500}
                     placeholder="例如：胶片感、肤色自然、压高光、让背景更通透；追色时会结合参考图一起判断。"
                     onChange={(event) => setAiInstruction(event.target.value)}
-                    disabled={isAiTuning}
                   />
                 </label>
                 <div className="ai-actions">
@@ -4145,50 +4496,96 @@ export function App() {
                   </button>
                   <button
                     data-testid="ai-style-match-button"
-                    title={aiActionTitle}
+                    title={aiActionTitle ?? "点击后选择参考图"}
                     onClick={() => runAiTuning("styleMatch")}
-                    disabled={!selectedAssetAiCapable || !referenceStyle || isAiTuning || isRendering || isBatchProcessing}
+                    disabled={!selectedAssetAiCapable || isAiTuning || isRendering || isBatchProcessing}
                   >
                     {isAiTuning ? <Loader2 size={16} className="spin" /> : <Palette size={16} />}
                     AI 追色
-                  </button>
-                  <button
-                    data-testid="ai-batch-auto-color-button"
-                    onClick={() => runBatchAiTuning("autoColor")}
-                    disabled={previewEditableBatchTargets.length === 0 || isAiTuning || isRendering || isBatchProcessing}
-                  >
-                    <Sparkles size={16} />
-                    批量 AI 调色
-                  </button>
-                  <button
-                    data-testid="ai-batch-style-match-button"
-                    onClick={() => runBatchAiTuning("styleMatch")}
-                    disabled={previewEditableBatchTargets.length === 0 || !referenceStyle || isAiTuning || isRendering || isBatchProcessing}
-                  >
-                    <Palette size={16} />
-                    批量 AI 追色
                   </button>
                 </div>
                 <div className="ai-panel-message">
                   <span>{aiPanelMessage || "AI 只在用户点击时发送压缩预览图"}</span>
                 </div>
-                {aiPendingSuggestion && aiPendingSuggestion.assetId === selectedAsset?.id && (
-                  <div className="ai-suggestion-card" data-testid="ai-suggestion-card">
-                    <img src={aiPendingSuggestion.previewUrl} alt="AI candidate preview" />
+                {isAiTuning && (
+                  <div className="ai-running-card" data-testid="ai-running-card">
+                    <Loader2 className="spin" size={16} />
                     <div>
-                      <strong>{aiPendingSuggestion.mode === "styleMatch" ? "AI style candidate" : "AI color candidate"}</strong>
-                      <span>{aiPendingSuggestion.model}</span>
-                      <p>{aiPendingSuggestion.summary}</p>
-                      {aiPendingSuggestion.fallbackHint && (
-                        <p className="ai-suggestion-fallback" data-testid="ai-suggestion-fallback">
-                          {aiPendingSuggestion.fallbackHint}
-                        </p>
-                      )}
+                      <strong>AI 正在生成方案</strong>
+                      <span>会生成 3 套候选；你仍可以浏览照片、调整参数或继续整理项目。</span>
                     </div>
+                  </div>
+                )}
+                {currentAiSuggestions.length > 0 && selectedAiSuggestion && (
+                  <div className="ai-suggestion-card" data-testid="ai-suggestion-card">
+                    <div className="ai-suggestion-head">
+                      <strong>{selectedAiSuggestion.mode === "styleMatch" ? "AI 追色方案" : "AI 调色方案"}</strong>
+                      <span>{selectedAiSuggestion.model}</span>
+                    </div>
+                    <div className="ai-scheme-list" role="list" aria-label="AI 调色方案">
+                      {currentAiSuggestions.map((suggestion) => (
+                        <button
+                          key={suggestion.id}
+                          type="button"
+                          className={suggestion.id === selectedAiSuggestion.id ? "active" : ""}
+                          data-testid={`ai-suggestion-option-${suggestion.id}`}
+                          onClick={() => {
+                            setSelectedAiSuggestionId(suggestion.id);
+                            setAiCandidateStrength(100);
+                            setAiAdjustedPreview(suggestion.previewUrl);
+                          }}
+                        >
+                          <strong>{suggestion.label}</strong>
+                          <span>{suggestion.summary}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <label className="strength-control ai-strength-control">
+                      <span>
+                        滤镜程度
+                        <strong>{aiCandidateStrength}%</strong>
+                      </span>
+                      <input
+                        data-testid="ai-candidate-strength-range"
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={aiCandidateStrength}
+                        onChange={(event) => setAiCandidateStrength(Number(event.target.value))}
+                      />
+                    </label>
+                    <p>当前方案已显示在大图中；可用上方对比按钮查看原图/分屏。</p>
+                    {isAiPreviewRendering && <span className="ai-preview-rendering">正在更新大图预览</span>}
+                    {selectedAiSuggestion.fallbackHint && (
+                      <p className="ai-suggestion-fallback" data-testid="ai-suggestion-fallback">
+                        {selectedAiSuggestion.fallbackHint}
+                      </p>
+                    )}
+                    {selectedAiSuggestion.mode === "styleMatch" && (
+                      <div className="ai-preset-save">
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={saveAiStyleAsPreset}
+                            onChange={(event) => setSaveAiStyleAsPreset(event.target.checked)}
+                          />
+                          保存当前追色配方到我的预设
+                        </label>
+                        {saveAiStyleAsPreset && (
+                          <input
+                            type="text"
+                            value={aiStylePresetName}
+                            placeholder="预设名称"
+                            onChange={(event) => setAiStylePresetName(event.target.value)}
+                          />
+                        )}
+                      </div>
+                    )}
                     <div className="ai-suggestion-actions">
                       <button data-testid="ai-apply-suggestion-button" onClick={applyAiSuggestion}>
                         <CheckSquare size={16} />
-                        应用
+                        应用当前方案
                       </button>
                       <button data-testid="ai-cancel-suggestion-button" onClick={cancelAiSuggestion}>
                         <Ban size={16} />
@@ -4490,9 +4887,18 @@ export function App() {
                 <div className="export-history" data-testid="export-history">
                   <div className="panel-subhead">
                     <strong>最近导出</strong>
-                    <button className="text-button" onClick={refreshExportHistory} disabled={exportProgress.running}>
-                      刷新
-                    </button>
+                    <div className="subhead-actions">
+                      <button className="text-button" onClick={refreshExportHistory} disabled={exportProgress.running}>
+                        刷新
+                      </button>
+                      <button
+                        className="text-button danger"
+                        onClick={clearExportHistory}
+                        disabled={exportProgress.running || exportHistory.length === 0}
+                      >
+                        清空
+                      </button>
+                    </div>
                   </div>
                   {exportHistory.length === 0 ? (
                     <p>还没有桌面导出记录</p>

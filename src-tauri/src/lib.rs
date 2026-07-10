@@ -295,7 +295,7 @@ fn load_stored_ai_settings(app: &tauri::AppHandle) -> AiStoredSettings {
 
 fn keyring_entry() -> Result<Entry, String> {
     Entry::new(AI_KEYRING_SERVICE, AI_KEYRING_USER)
-        .map_err(|_| "系统钥匙串不可用，无法保存或读取 API key".to_string())
+        .map_err(|error| format!("系统钥匙串不可用，无法保存或读取 API key：{error}"))
 }
 
 fn has_ai_api_key() -> bool {
@@ -309,7 +309,7 @@ fn load_ai_api_key() -> Result<String, String> {
     let api_key = keyring_entry().and_then(|entry| {
         entry
             .get_password()
-            .map_err(|_| "请先在 AI 设置中保存 API key".to_string())
+            .map_err(|error| format!("请先在 AI 设置中保存 API key；钥匙串读取失败：{error}"))
     })?;
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
@@ -458,7 +458,10 @@ fn build_ai_connection_diagnostic(
 
     match model_list {
         Ok(model_list) => {
-            let model_available = model_list.models.iter().any(|model| model == &settings.model);
+            let model_available = model_list
+                .models
+                .iter()
+                .any(|model| model == &settings.model);
             let model_count = model_list.models.len();
             let message = if model_available {
                 format!("AI 连接诊断通过：已获取 {model_count} 个模型，当前模型可用。")
@@ -501,7 +504,11 @@ fn get_ai_settings(app: tauri::AppHandle) -> Result<AiSettingsState, String> {
     } else {
         Vec::new()
     };
-    Ok(build_ai_settings_state(settings, has_api_key, available_models))
+    Ok(build_ai_settings_state(
+        settings,
+        has_api_key,
+        available_models,
+    ))
 }
 
 #[tauri::command]
@@ -514,7 +521,7 @@ fn save_ai_settings(
         if !api_key.is_empty() {
             keyring_entry()?
                 .set_password(api_key)
-                .map_err(|_| "API key 写入系统钥匙串失败".to_string())?;
+                .map_err(|error| format!("API key 写入系统钥匙串失败：{error}"))?;
         }
     }
 
@@ -994,12 +1001,42 @@ fn tune_photo_with_openai(
         let responses_endpoint = format!("{candidate}/responses");
         let chat_endpoint = format!("{candidate}/chat/completions");
         attempts.extend([
-            ("图像 Responses", responses_endpoint.clone(), &responses_payload, false),
-            ("图像 Chat Completions", chat_endpoint.clone(), &chat_payload, false),
-            ("文本降级 Responses", responses_endpoint.clone(), &text_only_responses_payload, true),
-            ("文本降级 Chat Completions", chat_endpoint.clone(), &text_only_chat_payload, true),
-            ("Strict JSON Chat Completions", chat_endpoint, &strict_json_chat_payload, true),
-            ("Strict JSON Responses", responses_endpoint, &strict_json_responses_payload, true),
+            (
+                "图像 Responses",
+                responses_endpoint.clone(),
+                &responses_payload,
+                false,
+            ),
+            (
+                "图像 Chat Completions",
+                chat_endpoint.clone(),
+                &chat_payload,
+                false,
+            ),
+            (
+                "文本降级 Responses",
+                responses_endpoint.clone(),
+                &text_only_responses_payload,
+                true,
+            ),
+            (
+                "文本降级 Chat Completions",
+                chat_endpoint.clone(),
+                &text_only_chat_payload,
+                true,
+            ),
+            (
+                "Strict JSON Chat Completions",
+                chat_endpoint,
+                &strict_json_chat_payload,
+                true,
+            ),
+            (
+                "Strict JSON Responses",
+                responses_endpoint,
+                &strict_json_responses_payload,
+                true,
+            ),
         ]);
     }
     let mut attempt_errors: Vec<String> = Vec::new();
@@ -1740,10 +1777,7 @@ fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<PhotoFilePayload>, St
         let file_metadata =
             fs::metadata(&path).map_err(|error| format!("无法读取文件信息：{error}"))?;
         if file_metadata.len() > MAX_IMPORT_FILE_BYTES {
-            return Err(format!(
-                "文件超过 128 MB 上限：{}",
-                path.to_string_lossy()
-            ));
+            return Err(format!("文件超过 128 MB 上限：{}", path.to_string_lossy()));
         }
         total_bytes = total_bytes.saturating_add(file_metadata.len());
         if total_bytes > MAX_IMPORT_TOTAL_BYTES {
@@ -1773,7 +1807,6 @@ fn read_photo_files(file_paths: Vec<String>) -> Result<Vec<PhotoFilePayload>, St
 
     Ok(files)
 }
-
 
 #[tauri::command]
 fn record_export_job(
@@ -1875,6 +1908,13 @@ fn list_export_jobs_from_connection(
         .map_err(|error| format!("无法解析导出记录：{error}"))
 }
 
+fn clear_export_jobs_from_connection(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM export_jobs", [])
+        .map(|_| ())
+        .map_err(|error| format!("无法清空导出记录：{error}"))
+}
+
 #[tauri::command]
 fn list_export_jobs(
     app: tauri::AppHandle,
@@ -1882,6 +1922,16 @@ fn list_export_jobs(
 ) -> Result<Vec<ExportJobHistory>, String> {
     let connection = open_project_db(&app)?;
     list_export_jobs_from_connection(&connection, limit.unwrap_or(6))
+}
+
+#[tauri::command]
+fn clear_export_jobs(app: tauri::AppHandle) -> Result<ProjectStoreInfo, String> {
+    let connection = open_project_db(&app)?;
+    clear_export_jobs_from_connection(&connection)?;
+
+    Ok(ProjectStoreInfo {
+        path: project_db_path(&app)?.to_string_lossy().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1926,6 +1976,7 @@ pub fn run() {
             get_project_store_summary,
             record_export_job,
             list_export_jobs,
+            clear_export_jobs,
             get_ai_settings,
             save_ai_settings,
             diagnose_ai_connection,
@@ -2014,6 +2065,38 @@ mod tests {
             .as_ref()
             .and_then(|value| value.as_array())
             .is_some());
+    }
+
+    #[test]
+    fn clear_export_jobs_removes_history() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        ensure_export_jobs_schema(&connection).expect("export jobs schema should be created");
+        connection
+            .execute(
+                "
+        INSERT INTO export_jobs (
+          job_id, mode, status, total_count, completed_count, failed_count, output_dir, details_json
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+                params![
+                    "export-clear",
+                    "single",
+                    "completed",
+                    1_i64,
+                    1_i64,
+                    0_i64,
+                    "C:\\exports",
+                    r#"{"items":[],"failed":[]}"#
+                ],
+            )
+            .expect("export job should insert");
+
+        clear_export_jobs_from_connection(&connection).expect("export jobs should clear");
+        let history =
+            list_export_jobs_from_connection(&connection, 6).expect("export history should list");
+
+        assert!(history.is_empty());
     }
 
     #[test]
@@ -2110,8 +2193,8 @@ mod tests {
         let jpg_path = root.join("sample.jpg");
         fs::write(&jpg_path, [0xff_u8, 0xd8, 0xff, 0xd9]).expect("jpg sample should be written");
 
-        let files =
-            read_photo_files(vec![jpg_path.to_string_lossy().to_string()]).expect("jpg should read");
+        let files = read_photo_files(vec![jpg_path.to_string_lossy().to_string()])
+            .expect("jpg should read");
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "sample.jpg");
@@ -2256,8 +2339,10 @@ mod tests {
             base_url: "https://example.test/v1".to_string(),
         };
 
-        let models =
-            available_ai_models_with_saved_fallback(&settings, Err("network unavailable".to_string()));
+        let models = available_ai_models_with_saved_fallback(
+            &settings,
+            Err("network unavailable".to_string()),
+        );
 
         assert_eq!(models, vec!["saved-model".to_string()]);
     }

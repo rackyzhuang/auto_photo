@@ -1,6 +1,6 @@
 [package]
 name = "auto-photo"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop auto color grading client for professional camera photos"
 authors = ["AutoPhoto"]
 license = ""
@@ -27,5 +27,5 @@ tauri-plugin-dialog = "2"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-keyring = { version = "3", features = ["windows-native"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 kamadak-exif = "0.6.1"

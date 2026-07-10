@@ -52,6 +52,22 @@ export const choosePhotoFilePaths = async (): Promise<string[]> => {
   return typeof selected === "string" ? [selected] : [];
 };
 
+export const chooseReferencePhotoFilePath = async (): Promise<string | undefined> => {
+  if (!isTauriRuntime()) return undefined;
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    title: "选择 AI 追色参考图",
+    filters: [
+      {
+        name: "JPG or RAW reference",
+        extensions: ["jpg", "jpeg", "arw", "nef"]
+      }
+    ]
+  });
+  return typeof selected === "string" ? selected : undefined;
+};
+
 export interface SavedExportResult {
   path: string;
   skipped: boolean;
@@ -149,6 +165,11 @@ export const listExportJobs = async (limit = 6): Promise<ExportJobHistory[]> => 
   return invoke<ExportJobHistory[]>("list_export_jobs", {
     limit
   });
+};
+
+export const clearExportJobs = async (): Promise<string> => {
+  const result = await invoke<{ path: string }>("clear_export_jobs");
+  return result.path;
 };
 
 export const getAiSettings = async (): Promise<AiSettingsState> => {

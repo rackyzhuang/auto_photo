@@ -271,13 +271,7 @@ export const importPhotoFile = async (file: File, fileHash?: string): Promise<Ph
           model,
           lens
         },
-        edits: createDefaultEditParams(),
-        autoSummary: [
-          embeddedPreviewUrl ? "已提取 RAW 内嵌预览图" : "未找到可用 RAW 内嵌预览，显示占位图",
-          metadata.model
-            ? "RAW 元数据已读取，完整显影和 RAW 输出将在最后阶段接入"
-            : "RAW 已记录到项目，完整显影和 RAW 输出将在最后阶段接入"
-        ]
+        edits: createDefaultEditParams()
       };
     }
 
@@ -325,7 +319,10 @@ export const analyzeImageSource = async (sourceUrl: string, orientation?: number
   let g = 0;
   let b = 0;
   let luma = 0;
+  let lumaSquares = 0;
   let skinLike = 0;
+  let shadowCount = 0;
+  let highlightCount = 0;
   const count = pixels.length / 4;
 
   for (let i = 0; i < pixels.length; i += 4) {
@@ -337,6 +334,9 @@ export const analyzeImageSource = async (sourceUrl: string, orientation?: number
     g += green;
     b += blue;
     luma += y;
+    lumaSquares += y * y;
+    if (y < 58) shadowCount += 1;
+    if (y > 210) highlightCount += 1;
 
     const max = Math.max(red, green, blue);
     const min = Math.min(red, green, blue);
@@ -349,9 +349,13 @@ export const analyzeImageSource = async (sourceUrl: string, orientation?: number
   const averageG = g / count;
   const averageB = b / count;
   const averageLuma = luma / count;
+  const lumaVariance = Math.max(0, lumaSquares / count - averageLuma * averageLuma);
 
   return {
     averageLuma,
+    lumaStdDev: Math.sqrt(lumaVariance),
+    shadowRatio: shadowCount / count,
+    highlightRatio: highlightCount / count,
     redBalance: averageR / 255,
     greenBalance: averageG / 255,
     blueBalance: averageB / 255,
@@ -371,11 +375,15 @@ export const createAutoEdit = (asset: PhotoAsset, analysis: AutoAnalysis): { edi
   const temperature = clamp(-analysis.warmBias * 42 + brandWarmOffset, -28, 28);
   const tint = clamp((analysis.greenBalance - (analysis.redBalance + analysis.blueBalance) / 2) * -45 + brandTintOffset, -20, 20);
   const skinProtection = analysis.skinLikeRatio > 0.035 ? 84 : 62;
+  const lowContrastBoost = clamp((54 - analysis.lumaStdDev) * 0.62, 0, 18);
+  const hazeBoost = clamp(lowContrastBoost + Math.max(0, 0.1 - analysis.shadowRatio) * 42, 0, 20);
+  const transparency = analysis.skinLikeRatio > 0.04 ? clamp(14 + lowContrastBoost * 0.55, 10, 24) : clamp(22 + hazeBoost, 16, 42);
 
   if (Math.abs(exposure) > 4) summary.push(exposure > 0 ? "提亮整体曝光" : "压低整体曝光");
   if (Math.abs(temperature) > 4) summary.push(temperature > 0 ? "修正偏冷色温" : "修正偏暖色温");
   if (Math.abs(tint) > 3) summary.push("修正绿/洋红色偏");
   if (skinProtection > 75) summary.push("启用高强度肤色保护");
+  if (transparency >= 18) summary.push("提升画面通透度");
   if (asset.cameraBrand !== "Unknown") summary.push(`应用 ${asset.cameraBrand} JPG 默认校正`);
 
   const edits = mergeEditParams(createDefaultEditParams(), {
@@ -388,12 +396,13 @@ export const createAutoEdit = (asset: PhotoAsset, analysis: AutoAnalysis): { edi
     whites: clamp(5 + exposure * 0.08, -4, 10),
     blacks: clamp(-8 - Math.max(0, analysis.averageLuma - 128) * 0.08, -16, -4),
     saturation: analysis.skinLikeRatio > 0.04 ? -1 : 2,
-    vibrance: analysis.skinLikeRatio > 0.04 ? 8 : 12,
+    vibrance: analysis.skinLikeRatio > 0.04 ? 10 : 14,
     sharpness: asset.metadata.iso && asset.metadata.iso >= 3200 ? 4 : 10,
     noiseReduction: asset.metadata.iso ? clamp((asset.metadata.iso - 800) / 180, 0, 22) : 4,
-    clarity: analysis.skinLikeRatio > 0.04 ? 2 : 8,
-    texture: analysis.skinLikeRatio > 0.04 ? -2 : 6,
-    dehaze: analysis.averageLuma < 92 ? 2 : 6,
+    transparency,
+    clarity: analysis.skinLikeRatio > 0.04 ? 4 : clamp(10 + lowContrastBoost * 0.25, 8, 16),
+    texture: analysis.skinLikeRatio > 0.04 ? -1 : clamp(6 + lowContrastBoost * 0.18, 5, 12),
+    dehaze: analysis.skinLikeRatio > 0.04 ? clamp(5 + hazeBoost * 0.3, 4, 12) : clamp(10 + hazeBoost * 0.5, 8, 22),
     vignette: analysis.skinLikeRatio > 0.04 ? 4 : 0,
     grain: 0,
     skinProtection
