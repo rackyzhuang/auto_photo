@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
 
+env:
+  NODE_VERSION: "20"
+
 jobs:
   build-release:
     name: Build ${{ matrix.name }}
@@ -54,7 +57,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Setup Rust
@@ -82,7 +85,187 @@ jobs:
         with:
           tagName: ${{ steps.release.outputs.version }}
           releaseName: AutoPhoto ${{ steps.release.outputs.version }}
-          releaseBody: AutoPhoto 桌面版发布。
+          releaseBody: AutoPhoto 桌面版与移动端构建产物发布。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  build-android:
+    name: Build Android APK/AAB
+    runs-on: ubuntu-latest
+    needs: build-release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release version
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Initialize Android project
+        shell: bash
+        run: |
+          if [ ! -d src-tauri/gen/android ]; then
+            npm run mobile:android:init:ci
+          fi
+
+      - name: Build Android APK and AAB
+        run: npm run mobile:android:build:release
+
+      - name: Build Android debug APK
+        run: npm run mobile:android:build:debug-apk
+
+      - name: Collect Android artifacts
+        shell: bash
+        run: |
+          mkdir -p mobile-artifacts/android
+          find src-tauri/gen/android -type f \( -name "*.apk" -o -name "*.aab" \) -exec cp {} mobile-artifacts/android/ \;
+          find mobile-artifacts/android -type f -print
+          test "$(find mobile-artifacts/android -type f | wc -l)" -gt 0
+
+      - name: Upload Android workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoPhoto-Android-${{ steps.release.outputs.version }}
+          path: mobile-artifacts/android/*
+
+      - name: Attach Android artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.version }}
+          files: mobile-artifacts/android/*
+
+  build-ios:
+    name: Build iOS
+    runs-on: macos-latest
+    needs: build-release
+    env:
+      IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release version
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Initialize iOS project
+        shell: bash
+        run: |
+          if [ ! -d src-tauri/gen/apple ]; then
+            npm run mobile:ios:init:ci
+          fi
+
+      - name: Build iOS simulator app
+        run: npm run mobile:ios:build:simulator
+
+      - name: Build signed iOS IPA
+        if: env.IOS_CERTIFICATE != '' && env.IOS_CERTIFICATE_PASSWORD != '' && env.IOS_MOBILE_PROVISION != ''
+        run: npm run mobile:ios:build:release
+
+      - name: Collect iOS artifacts
+        shell: bash
+        run: |
+          mkdir -p mobile-artifacts/ios
+          find src-tauri/gen/apple -type f -name "*.ipa" -exec cp {} mobile-artifacts/ios/ \;
+          while IFS= read -r -d '' app; do
+            ditto -c -k --keepParent "$app" "mobile-artifacts/ios/$(basename "$app").zip"
+          done < <(find src-tauri/gen/apple -type d -name "*.app" -print0)
+          while IFS= read -r -d '' archive; do
+            ditto -c -k --keepParent "$archive" "mobile-artifacts/ios/$(basename "$archive").zip"
+          done < <(find src-tauri/gen/apple -type d -name "*.xcarchive" -print0)
+          find mobile-artifacts/ios -type f -print
+          test "$(find mobile-artifacts/ios -type f | wc -l)" -gt 0
+
+      - name: Upload iOS workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoPhoto-iOS-${{ steps.release.outputs.version }}
+          path: mobile-artifacts/ios/*
+
+      - name: Attach iOS artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.version }}
+          files: mobile-artifacts/ios/*
