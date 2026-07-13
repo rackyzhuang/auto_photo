@@ -83,6 +83,7 @@ import {
   getAiSettings,
   getProjectStoreSummary,
   getProjectStorePath,
+  isAiRuntimeAvailable,
   isTauriRuntime,
   listExportJobs,
   listNamedProjectSnapshots,
@@ -839,6 +840,7 @@ export function App() {
       : undefined
   );
   const [customPresets, setCustomPresets] = useState<Preset[]>(() => initialStoredState.customPresets ?? []);
+  const [selectedPresetByAsset, setSelectedPresetByAsset] = useState<Record<string, string>>({});
   const [presetName, setPresetName] = useState("");
   const [exportDirectory, setExportDirectory] = useState<string>();
   const [browserExportDirectoryName, setBrowserExportDirectoryName] = useState<string>();
@@ -930,6 +932,7 @@ export function App() {
   const selectedAssetReferenceCapable = selectedAssetAiCapable;
   const selectedAssetPreviewEditable = selectedAssetAiCapable;
   const selectedAssetPreviewExportable = Boolean(selectedAssetEditable || selectedAssetRawAiCapable);
+  const selectedPresetId = selectedAsset ? selectedPresetByAsset[selectedAsset.id] : undefined;
   const isCropEditing = Boolean(selectedAsset && cropDraft?.assetId === selectedAsset.id);
   const rawBatchSkipCount = batchTargets.length - editableBatchTargets.length;
   const previewBatchSkipCount = batchTargets.length - previewEditableBatchTargets.length;
@@ -979,8 +982,8 @@ export function App() {
   );
 
   useEffect(() => {
-    if (!isTauriRuntime()) {
-      setAiPanelMessage("AI 调色仅在桌面端可用");
+    if (!isAiRuntimeAvailable()) {
+      setAiPanelMessage("AI 调色需要桌面端或本地开发调试桥");
       return;
     }
 
@@ -1614,11 +1617,30 @@ export function App() {
     );
   };
 
-  const commitSelectedEdits = (edits: EditParams, autoSummary?: string[]) => {
+  const markSelectedPreset = (assetId: string, presetId?: string) => {
+    setSelectedPresetByAsset((current) => {
+      const next = { ...current };
+      if (presetId) {
+        next[assetId] = presetId;
+      } else {
+        delete next[assetId];
+      }
+      return next;
+    });
+  };
+
+  const commitSelectedEdits = (
+    edits: EditParams,
+    autoSummary?: string[],
+    options?: { presetId?: string }
+  ) => {
     if (!selectedAsset) return;
     const before = normalizeEditParams(selectedAsset.edits);
     const normalizedEdits = normalizeEditParams(edits);
-    if (valuesAreEqual(before, normalizedEdits)) return;
+    if (valuesAreEqual(before, normalizedEdits)) {
+      if (options?.presetId) markSelectedPreset(selectedAsset.id, options.presetId);
+      return;
+    }
     setHistoryByAsset((current) => ({
       ...current,
       [selectedAsset.id]: {
@@ -1631,6 +1653,7 @@ export function App() {
       edits: normalizedEdits,
       autoSummary: autoSummary ?? asset.autoSummary
     }));
+    markSelectedPreset(selectedAsset.id, options?.presetId);
   };
 
   const previewSelectedEdits = (edits: EditParams) => {
@@ -1648,6 +1671,7 @@ export function App() {
   const beginEditDraft = () => {
     if (!selectedAsset || !selectedAssetPreviewEditable) return;
     if (editDraftRef.current?.assetId === selectedAsset.id) return;
+    markSelectedPreset(selectedAsset.id);
     editDraftRef.current = {
       assetId: selectedAsset.id,
       before: normalizeEditParams(selectedAsset.edits),
@@ -1678,6 +1702,7 @@ export function App() {
       edits: after,
       autoSummary: autoSummary ?? asset.autoSummary
     }));
+    markSelectedPreset(selectedAsset.id);
   };
 
   const undoSelected = () => {
@@ -1695,6 +1720,7 @@ export function App() {
           }
         }));
         updateSelectedAsset((asset) => ({ ...asset, edits: beforeDraft, autoSummary: ["已撤销上一步调色"] }));
+        markSelectedPreset(selectedAsset.id);
         setStatus("已撤销上一步调色");
         return;
       }
@@ -1712,6 +1738,7 @@ export function App() {
       }
     }));
     updateSelectedAsset((asset) => ({ ...asset, edits: previous, autoSummary: ["已撤销上一步调色"] }));
+    markSelectedPreset(selectedAsset.id);
     setStatus("已撤销上一步调色");
   };
 
@@ -1729,6 +1756,7 @@ export function App() {
       }
     }));
     updateSelectedAsset((asset) => ({ ...asset, edits: nextEdit, autoSummary: ["已重做调色"] }));
+    markSelectedPreset(selectedAsset.id);
     setStatus("已重做调色");
   };
 
@@ -1973,9 +2001,11 @@ export function App() {
     setBatchConsistencyPreview(undefined);
   };
 
-  const applyPreset = (params: Partial<EditParams>) => {
+  const applyPreset = (preset: Preset) => {
     if (!selectedAsset || !selectedAssetPreviewEditable) return;
-    commitSelectedEdits(mergeEditParams(selectedAsset.edits, params), ["应用预设参数"]);
+    commitSelectedEdits(mergeEditParams(selectedAsset.edits, preset.params), [`应用预设：${preset.name}`], {
+      presetId: preset.id
+    });
   };
 
   const saveCustomPreset = () => {
@@ -1994,6 +2024,13 @@ export function App() {
 
   const deleteCustomPreset = (presetId: string) => {
     setCustomPresets((current) => current.filter((preset) => preset.id !== presetId));
+    setSelectedPresetByAsset((current) => {
+      const next = { ...current };
+      for (const [assetId, selectedPresetId] of Object.entries(next)) {
+        if (selectedPresetId === presetId) delete next[assetId];
+      }
+      return next;
+    });
     setStatus("已删除自定义预设");
   };
 
@@ -2477,8 +2514,8 @@ export function App() {
   };
 
   const saveCurrentAiSettings = async () => {
-    if (!isTauriRuntime()) {
-      setAiPanelMessage("AI 设置仅在桌面端可保存");
+    if (!isAiRuntimeAvailable()) {
+      setAiPanelMessage("AI 设置需要桌面端或本地开发调试桥");
       return;
     }
     if (!aiSettings.hasApiKey && !aiApiKeyDraft.trim()) {
@@ -2516,7 +2553,7 @@ export function App() {
 
   const updateAiModelSelection = async (model: string) => {
     setAiModelDraft(model);
-    if (!isTauriRuntime() || !aiSettings.hasApiKey || !model) return;
+    if (!isAiRuntimeAvailable() || !aiSettings.hasApiKey || !model) return;
     setIsSavingAiSettings(true);
     setAiPanelMessage("正在切换 AI 模型");
     try {
@@ -2539,8 +2576,8 @@ export function App() {
   };
 
   const runAiConnectionDiagnostic = async () => {
-    if (!isTauriRuntime()) {
-      setAiPanelMessage("AI 连接诊断仅在桌面端可用");
+    if (!isAiRuntimeAvailable()) {
+      setAiPanelMessage("AI 连接诊断需要桌面端或本地开发调试桥");
       return;
     }
     setIsDiagnosingAi(true);
@@ -2614,7 +2651,7 @@ export function App() {
       let fallbackReason = "";
       let fallbackHint = "";
 
-      if (isTauriRuntime() && aiSettings.hasApiKey) {
+      if (isAiRuntimeAvailable() && aiSettings.hasApiKey) {
         try {
           const analysis = await analyzeAssetForAi(selectedAsset);
           const localAuto = createAutoEdit(selectedAsset, analysis);
@@ -2662,10 +2699,10 @@ export function App() {
           };
         }
       } else {
-        fallbackReason = isTauriRuntime() ? "AI key 尚未保存" : "当前不是桌面运行时";
-        fallbackHint = isTauriRuntime()
+        fallbackReason = isAiRuntimeAvailable() ? "AI key 尚未保存" : "当前不是桌面运行时或开发调试桥";
+        fallbackHint = isAiRuntimeAvailable()
           ? "下一步：保存 API key 和 Base URL 后点击“诊断 AI 连接”，确认模型列表和当前模型可用。"
-          : "下一步：请在 Windows/macOS 桌面版中配置 AI；浏览器预览不会发送远端 AI 请求。";
+          : "下一步：请在 Windows/macOS 桌面版中配置 AI，或使用 npm run dev 启动本地开发调试桥。";
       }
 
       setAiPanelMessage(`正在渲染 3 套${modeText}大图预览，可继续使用其他功能`);
@@ -4519,9 +4556,17 @@ export function App() {
                         <button
                           key={preset.id}
                           data-testid={`preset-button-${preset.id}`}
-                          onClick={() => applyPreset(preset.params)}
+                          className={selectedPresetId === preset.id ? "active" : undefined}
+                          aria-pressed={selectedPresetId === preset.id}
+                          onClick={() => applyPreset(preset)}
                           disabled={!selectedAssetPreviewEditable}
                         >
+                          {selectedPresetId === preset.id && (
+                            <span className="preset-selected-badge">
+                              <Check size={13} />
+                              当前
+                            </span>
+                          )}
                           <em>{preset.series}</em>
                           <strong>{preset.name}</strong>
                           <span>{preset.description}</span>
@@ -4553,7 +4598,18 @@ export function App() {
                   <div className="custom-preset-list">
                     {customPresets.map((preset) => (
                       <div className="custom-preset-row" key={preset.id}>
-                        <button onClick={() => applyPreset(preset.params)} disabled={!selectedAssetPreviewEditable}>
+                        <button
+                          className={selectedPresetId === preset.id ? "active" : undefined}
+                          aria-pressed={selectedPresetId === preset.id}
+                          onClick={() => applyPreset(preset)}
+                          disabled={!selectedAssetPreviewEditable}
+                        >
+                          {selectedPresetId === preset.id && (
+                            <span className="preset-selected-badge">
+                              <Check size={13} />
+                              当前
+                            </span>
+                          )}
                           <strong>{preset.name}</strong>
                           <span>{preset.description}</span>
                         </button>
@@ -4629,7 +4685,7 @@ export function App() {
                         />
                       </label>
                     </div>
-                    <button data-testid="ai-save-settings-button" onClick={saveCurrentAiSettings} disabled={!isTauriRuntime() || isSavingAiSettings}>
+                    <button data-testid="ai-save-settings-button" onClick={saveCurrentAiSettings} disabled={!isAiRuntimeAvailable() || isSavingAiSettings}>
                       {isSavingAiSettings ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
                       {isSavingAiSettings ? "保存并获取模型中" : "保存 AI 设置并获取模型"}
                     </button>
@@ -4639,7 +4695,7 @@ export function App() {
                   type="button"
                   data-testid="ai-diagnose-connection-button"
                   onClick={runAiConnectionDiagnostic}
-                  disabled={!isTauriRuntime() || isSavingAiSettings || isDiagnosingAi || isAiTuning}
+                  disabled={!isAiRuntimeAvailable() || isSavingAiSettings || isDiagnosingAi || isAiTuning}
                 >
                   {isDiagnosingAi ? <Loader2 size={16} className="spin" /> : <ClipboardCheck size={16} />}
                   {isDiagnosingAi ? "诊断 AI 连接中" : "诊断 AI 连接"}

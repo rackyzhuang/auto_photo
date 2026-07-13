@@ -25,6 +25,32 @@ declare global {
 export const isTauriRuntime = () =>
   typeof window !== "undefined" && (detectTauriRuntime() || Boolean(window.__TAURI_INTERNALS__));
 
+const isDevAiBridgeRuntime = () =>
+  import.meta.env.DEV && typeof window !== "undefined" && !isTauriRuntime();
+
+export const isAiRuntimeAvailable = () => isTauriRuntime() || isDevAiBridgeRuntime();
+
+const requestDevAiBridge = async <Response>(
+  path: string,
+  options?: {
+    method?: "GET" | "POST";
+    body?: unknown;
+  }
+): Promise<Response> => {
+  const response = await fetch(`/__autophoto_dev_ai/${path.replace(/^\/+/, "")}`, {
+    method: options?.method ?? "GET",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: options?.body ? JSON.stringify(options.body) : undefined
+  });
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error || `开发 AI 调试桥请求失败：HTTP ${response.status}`);
+  }
+  return payload as Response;
+};
+
 export const chooseExportDirectory = async (): Promise<string | undefined> => {
   if (!isTauriRuntime()) return undefined;
   const selected = await open({
@@ -173,6 +199,7 @@ export const clearExportJobs = async (): Promise<string> => {
 };
 
 export const getAiSettings = async (): Promise<AiSettingsState> => {
+  if (isDevAiBridgeRuntime()) return requestDevAiBridge<AiSettingsState>("settings");
   return invoke<AiSettingsState>("get_ai_settings");
 };
 
@@ -181,12 +208,23 @@ export const saveAiSettings = async (settings: {
   model?: string;
   baseUrl: string;
 }): Promise<AiSettingsState> => {
+  if (isDevAiBridgeRuntime()) {
+    return requestDevAiBridge<AiSettingsState>("settings", {
+      method: "POST",
+      body: { settings }
+    });
+  }
   return invoke<AiSettingsState>("save_ai_settings", {
     settings
   });
 };
 
 export const diagnoseAiConnection = async (): Promise<AiConnectionDiagnostic> => {
+  if (isDevAiBridgeRuntime()) {
+    return requestDevAiBridge<AiConnectionDiagnostic>("diagnose", {
+      method: "POST"
+    });
+  }
   return invoke<AiConnectionDiagnostic>("diagnose_ai_connection");
 };
 
@@ -199,6 +237,12 @@ export const tunePhotoWithAi = async (request: {
   userInstruction?: string;
   currentParams: EditParams;
 }): Promise<AiTuningResult> => {
+  if (isDevAiBridgeRuntime()) {
+    return requestDevAiBridge<AiTuningResult>("tune", {
+      method: "POST",
+      body: { request }
+    });
+  }
   return invoke<AiTuningResult>("tune_photo_with_openai", {
     request
   });

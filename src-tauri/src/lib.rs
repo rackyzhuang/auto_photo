@@ -266,6 +266,9 @@ fn normalize_ai_model(model: Option<&str>) -> String {
     if trimmed.is_empty() {
         return DEFAULT_AI_MODEL.to_string();
     }
+    if trimmed.eq_ignore_ascii_case("gpt5.5") {
+        return DEFAULT_AI_MODEL.to_string();
+    }
     trimmed.chars().take(100).collect()
 }
 
@@ -458,12 +461,15 @@ fn build_ai_connection_diagnostic(
 
     match model_list {
         Ok(model_list) => {
-            let model_available = model_list
-                .models
-                .iter()
-                .any(|model| model == &settings.model);
             let model_count = model_list.models.len();
-            let message = if model_available {
+            let model_available = model_count == 0
+                || model_list
+                    .models
+                    .iter()
+                    .any(|model| model == &settings.model);
+            let message = if model_count == 0 {
+                "AI 连接诊断通过：模型列表为空，已保留当前手动模型用于调色请求。".to_string()
+            } else if model_available {
                 format!("AI 连接诊断通过：已获取 {model_count} 个模型，当前模型可用。")
             } else {
                 format!(

@@ -1,6 +1,6 @@
 {
   "name": "autophoto-client",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,13 @@
     "desktop:build": "tauri build",
     "desktop:build:no-bundle": "tauri build --no-bundle",
     "desktop:build:windows": "tauri build --bundles msi,nsis",
-    "desktop:build:mac": "tauri build --bundles app,dmg"
+    "desktop:build:mac": "tauri build --bundles app,dmg",
+    "mobile:android:init": "tauri android init",
+    "mobile:android:dev": "tauri android dev",
+    "mobile:android:build:apk": "tauri android build --apk",
+    "mobile:android:build:aab": "tauri android build --aab",
+    "mobile:ios:dev": "tauri ios dev",
+    "mobile:ios:build": "tauri ios build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
