@@ -216,9 +216,11 @@ jobs:
             --ks-key-alias "$key_alias" \
             --ks-pass "pass:$keystore_password" \
             --key-pass "pass:$key_password" \
+            --v4-signing-enabled false \
             --out "$signed_apk" \
             "$aligned_apk"
           "$build_tools/apksigner" verify --verbose "$signed_apk"
+          rm -f "$signed_apk.idsig"
 
           find mobile-artifacts/android -type f -print
           test "$(find mobile-artifacts/android -type f -name "*.apk" | wc -l)" -eq 1
@@ -227,13 +229,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AutoPhoto-Android-${{ steps.release.outputs.version }}
-          path: mobile-artifacts/android/*
+          path: mobile-artifacts/android/*.apk
 
       - name: Attach Android artifacts to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.version }}
-          files: mobile-artifacts/android/*
+          files: mobile-artifacts/android/*.apk
 
   build-ios:
     name: Build iOS
