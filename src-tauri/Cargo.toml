@@ -1,6 +1,6 @@
 [package]
 name = "auto-photo"
-version = "0.1.9"
+version = "0.1.10"
 description = "Desktop auto color grading client for professional camera photos"
 authors = ["AutoPhoto"]
 license = ""

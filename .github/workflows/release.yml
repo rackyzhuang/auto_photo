@@ -151,15 +151,29 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-      - name: Generate Android launcher icons from logo
-        run: npm run tauri -- icon logo.png
-
       - name: Initialize Android project
         shell: bash
         run: |
           if [ ! -d src-tauri/gen/android ]; then
             npm run mobile:android:init:ci
           fi
+
+      - name: Install AutoPhoto launcher icons into Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- icon src/assets/autophoto-logo-transparent.png
+
+          android_res="src-tauri/gen/android/app/src/main/res"
+          icon_res="src-tauri/icons/android"
+          test -d "$android_res"
+          test -d "$icon_res"
+          cp -R "$icon_res"/. "$android_res"/
+
+          cmp "$icon_res/mipmap-xxxhdpi/ic_launcher.png" "$android_res/mipmap-xxxhdpi/ic_launcher.png"
+          cmp "$icon_res/mipmap-xxxhdpi/ic_launcher_round.png" "$android_res/mipmap-xxxhdpi/ic_launcher_round.png"
+          cmp "$icon_res/mipmap-xxxhdpi/ic_launcher_foreground.png" "$android_res/mipmap-xxxhdpi/ic_launcher_foreground.png"
+          grep -q '@mipmap/ic_launcher' src-tauri/gen/android/app/src/main/AndroidManifest.xml
 
       - name: Build Android release APK
         run: npm run mobile:android:build:release

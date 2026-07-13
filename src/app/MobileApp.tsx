@@ -54,6 +54,9 @@ interface MobileAiCandidate {
   previewUrl: string;
 }
 
+const MOBILE_PREVIEW_MAX_EDGE = 1500;
+const MOBILE_PREVIEW_QUALITY = 0.9;
+
 const mobileTools: Array<{ id: MobileTool; label: string; icon: MobileIcon }> = [
   { id: "ai", label: "AI", icon: Sparkles },
   { id: "presets", label: "预设", icon: Palette },
@@ -386,6 +389,16 @@ const editParamsSignature = (params: EditParams) => JSON.stringify(normalizeEdit
 const areEditParamsEqual = (left: EditParams, right: EditParams) =>
   editParamsSignature(left) === editParamsSignature(right);
 
+const createOriginalCompareParams = (edits: EditParams) =>
+  mergeEditParams(createDefaultEditParams(), {
+    rotation: edits.rotation,
+    cropAspect: edits.cropAspect,
+    cropX: edits.cropX,
+    cropY: edits.cropY,
+    cropWidth: edits.cropWidth,
+    cropHeight: edits.cropHeight
+  });
+
 export function MobileApp({ capabilities }: MobileAppProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const assetRef = useRef<PhotoAsset>();
@@ -397,6 +410,8 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const [undoStack, setUndoStack] = useState<EditParams[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>();
   const [previewUrl, setPreviewUrl] = useState<string>();
+  const [originalCompareUrl, setOriginalCompareUrl] = useState<string>();
+  const [isPreparingCompare, setIsPreparingCompare] = useState(false);
   const [isCompareActive, setIsCompareActive] = useState(false);
   const [comparePosition, setComparePosition] = useState(50);
   const [activeTool, setActiveTool] = useState<MobileTool>("tuning");
@@ -424,7 +439,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
     [aiCandidates, selectedAiCandidateId]
   );
   const displayPreviewUrl = aiStrengthPreviewUrl ?? selectedAiCandidate?.previewUrl ?? previewUrl;
-  const canComparePreview = Boolean(asset && displayPreviewUrl);
+  const canComparePreview = Boolean(asset && displayPreviewUrl && originalCompareUrl);
 
   useEffect(() => {
     assetRef.current = asset;
@@ -462,8 +477,8 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       setIsRendering(true);
       try {
         const rendered = await renderImageSourceWithEdits(asset.objectUrl, edits, {
-          maxEdge: 1500,
-          quality: 0.88,
+          maxEdge: MOBILE_PREVIEW_MAX_EDGE,
+          quality: MOBILE_PREVIEW_QUALITY,
           orientation: asset.metadata.orientation,
           signal: controller.signal
         });
@@ -482,6 +497,34 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   }, [asset, edits]);
 
   useEffect(() => {
+    setOriginalCompareUrl(undefined);
+    if (!asset || !isCompareActive) {
+      setIsPreparingCompare(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsPreparingCompare(true);
+    void renderImageSourceWithEdits(asset.objectUrl, createOriginalCompareParams(edits), {
+      maxEdge: MOBILE_PREVIEW_MAX_EDGE,
+      quality: MOBILE_PREVIEW_QUALITY,
+      orientation: asset.metadata.orientation,
+      signal: controller.signal
+    })
+      .then((rendered) => {
+        if (!controller.signal.aborted) setOriginalCompareUrl(rendered);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setStatus(error instanceof Error ? error.message : "原图比较预览生成失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsPreparingCompare(false);
+      });
+
+    return () => controller.abort();
+  }, [asset, isCompareActive, edits.rotation, edits.cropAspect, edits.cropX, edits.cropY, edits.cropWidth, edits.cropHeight]);
+
+  useEffect(() => {
     if (!asset || !selectedAiCandidate || !aiBaselineRef.current) {
       setAiStrengthPreviewUrl(undefined);
       return;
@@ -491,8 +534,8 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       try {
         const blended = blendAiEditParams(aiBaselineRef.current ?? edits, selectedAiCandidate.params, aiStrength);
         const rendered = await renderImageSourceWithEdits(asset.objectUrl, blended, {
-          maxEdge: 1200,
-          quality: 0.86,
+          maxEdge: MOBILE_PREVIEW_MAX_EDGE,
+          quality: MOBILE_PREVIEW_QUALITY,
           orientation: asset.metadata.orientation,
           signal: controller.signal
         });
@@ -656,6 +699,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       setSelectedPresetId(undefined);
       setIsCompareActive(false);
       setComparePosition(50);
+      setOriginalCompareUrl(undefined);
       setAsset(imported);
       editsRef.current = imported.edits;
       setEdits(imported.edits);
@@ -840,8 +884,8 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       const candidates: MobileAiCandidate[] = [];
       for (const variant of variants) {
         const preview = await renderImageSourceWithEdits(asset.objectUrl, variant.params, {
-          maxEdge: 1200,
-          quality: 0.86,
+          maxEdge: MOBILE_PREVIEW_MAX_EDGE,
+          quality: MOBILE_PREVIEW_QUALITY,
           orientation: asset.metadata.orientation
         });
         candidates.push({
@@ -1135,7 +1179,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
           <>
             {isCompareActive && canComparePreview ? (
               <div className="mobile-compare-frame" style={{ transform: `scale(${previewZoom / 100})` }}>
-                <img src={asset.previewUrl} alt={`${asset.name} 原图`} />
+                <img src={originalCompareUrl} alt={`${asset.name} 原图`} />
                 <div className="mobile-compare-edited" style={{ clipPath: `inset(0 ${100 - comparePosition}% 0 0)` }}>
                   <img src={displayPreviewUrl} alt={`${asset.name} 效果`} />
                 </div>
@@ -1157,10 +1201,10 @@ export function MobileApp({ capabilities }: MobileAppProps) {
             ) : (
               <img className="mobile-preview-image" src={displayPreviewUrl} alt={asset.name} style={{ transform: `scale(${previewZoom / 100})` }} />
             )}
-            {(isRendering || isImporting || isAiRunning) && (
+            {(isRendering || isImporting || isAiRunning || isPreparingCompare) && (
               <span className="mobile-render-badge">
                 <Loader2 className="spin" size={15} />
-                {isAiRunning ? "AI 调色中" : isImporting ? "导入中" : "渲染中"}
+                {isAiRunning ? "AI 调色中" : isImporting ? "导入中" : isPreparingCompare ? "准备原图比较" : "渲染中"}
               </span>
             )}
             <div className="mobile-zoom-controls" aria-label="预览缩放">
