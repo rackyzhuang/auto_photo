@@ -87,7 +87,7 @@ jobs:
           args: ${{ matrix.args }}
 
   build-android:
-    name: Build Android APK/AAB
+    name: Build Android APK
     runs-on: ubuntu-latest
     needs: build-release
 
@@ -158,19 +158,70 @@ jobs:
             npm run mobile:android:init:ci
           fi
 
-      - name: Build Android APK and AAB
+      - name: Build Android release APK
         run: npm run mobile:android:build:release
 
-      - name: Build Android debug APK
-        run: npm run mobile:android:build:debug-apk
-
-      - name: Collect Android artifacts
+      - name: Sign Android release APK
         shell: bash
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          set -euo pipefail
+
           mkdir -p mobile-artifacts/android
-          find src-tauri/gen/android -type f \( -name "*.apk" -o -name "*.aab" \) -exec cp {} mobile-artifacts/android/ \;
+          version="${{ steps.release.outputs.version }}"
+          keystore="$RUNNER_TEMP/autophoto-release.jks"
+          aligned_apk="$RUNNER_TEMP/autophoto-release-aligned.apk"
+          signed_apk="mobile-artifacts/android/AutoPhoto_${version#v}_android.apk"
+          build_tools="$ANDROID_HOME/build-tools/35.0.0"
+
+          if [ -n "${ANDROID_KEY_BASE64:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ] && [ -n "${ANDROID_KEY_PASSWORD:-}" ]; then
+            printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$keystore"
+            key_alias="$ANDROID_KEY_ALIAS"
+            key_password="$ANDROID_KEY_PASSWORD"
+            keystore_password="${ANDROID_KEYSTORE_PASSWORD:-$ANDROID_KEY_PASSWORD}"
+            echo "Using Android signing key from GitHub Secrets."
+          else
+            echo "::warning::Android signing secrets are incomplete; generating an install-only signing key for this build."
+            key_alias="autophoto-install"
+            key_password="android"
+            keystore_password="android"
+            keytool -genkeypair \
+              -keystore "$keystore" \
+              -storepass "$keystore_password" \
+              -keypass "$key_password" \
+              -alias "$key_alias" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=AutoPhoto CI, OU=Install, O=AutoPhoto, L=CI, S=CI, C=US"
+          fi
+
+          release_apk="$(find src-tauri/gen/android -type f -name "*release-unsigned.apk" -print -quit)"
+          if [ -z "$release_apk" ]; then
+            release_apk="$(find src-tauri/gen/android -type f -name "*release*.apk" ! -name "*debug*.apk" -print -quit)"
+          fi
+          if [ -z "$release_apk" ]; then
+            echo "::error::No Android release APK was produced."
+            find src-tauri/gen/android -type f -name "*.apk" -print || true
+            exit 1
+          fi
+
+          "$build_tools/zipalign" -p -f 4 "$release_apk" "$aligned_apk"
+          "$build_tools/apksigner" sign \
+            --ks "$keystore" \
+            --ks-key-alias "$key_alias" \
+            --ks-pass "pass:$keystore_password" \
+            --key-pass "pass:$key_password" \
+            --out "$signed_apk" \
+            "$aligned_apk"
+          "$build_tools/apksigner" verify --verbose "$signed_apk"
+
           find mobile-artifacts/android -type f -print
-          test "$(find mobile-artifacts/android -type f | wc -l)" -gt 0
+          test "$(find mobile-artifacts/android -type f -name "*.apk" | wc -l)" -eq 1
 
       - name: Upload Android workflow artifacts
         uses: actions/upload-artifact@v4
@@ -214,7 +265,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+          targets: aarch64-apple-ios
 
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
@@ -234,9 +285,6 @@ jobs:
             npm run mobile:ios:init:ci
           fi
 
-      - name: Build iOS simulator app
-        run: npm run mobile:ios:build:simulator
-
       - name: Detect iOS signing configuration
         id: ios-signing
         shell: bash
@@ -249,7 +297,7 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "Apple signing secrets are incomplete; the simulator artifact will still be published."
+            echo "Apple signing secrets are incomplete; no iOS IPA will be published."
           fi
 
       - name: Build signed iOS IPA
@@ -260,27 +308,32 @@ jobs:
           IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
         run: npm run mobile:ios:build:release
 
-      - name: Collect iOS artifacts
+      - name: Collect iOS IPA
+        if: steps.ios-signing.outputs.enabled == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p mobile-artifacts/ios
-          find src-tauri/gen/apple -type f -name "*.ipa" -exec cp {} mobile-artifacts/ios/ \;
-          while IFS= read -r -d '' app; do
-            ditto -c -k --keepParent "$app" "mobile-artifacts/ios/$(basename "$app").zip"
-          done < <(find src-tauri/gen/apple -type d -name "*.app" -print0)
-          while IFS= read -r -d '' archive; do
-            ditto -c -k --keepParent "$archive" "mobile-artifacts/ios/$(basename "$archive").zip"
-          done < <(find src-tauri/gen/apple -type d -name "*.xcarchive" -print0)
+          version="${{ steps.release.outputs.version }}"
+          ipa="$(find src-tauri/gen/apple -type f -name "*.ipa" -print -quit)"
+          if [ -z "$ipa" ]; then
+            echo "::error::No signed iOS IPA was produced."
+            find src-tauri/gen/apple -type f -print || true
+            exit 1
+          fi
+          cp "$ipa" "mobile-artifacts/ios/AutoPhoto_${version#v}_ios.ipa"
           find mobile-artifacts/ios -type f -print
-          test "$(find mobile-artifacts/ios -type f | wc -l)" -gt 0
+          test "$(find mobile-artifacts/ios -type f -name "*.ipa" | wc -l)" -eq 1
 
       - name: Upload iOS workflow artifacts
+        if: steps.ios-signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: AutoPhoto-iOS-${{ steps.release.outputs.version }}
           path: mobile-artifacts/ios/*
 
       - name: Attach iOS artifacts to release
+        if: steps.ios-signing.outputs.enabled == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.version }}

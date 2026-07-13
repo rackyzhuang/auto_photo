@@ -1,6 +1,6 @@
 {
   "name": "autophoto-client",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -18,9 +18,7 @@
     "mobile:android:init:ci": "tauri android init --ci --skip-targets-install",
     "mobile:android:dev": "tauri android dev",
     "mobile:android:build:apk": "tauri android build --apk",
-    "mobile:android:build:aab": "tauri android build --aab",
-    "mobile:android:build:release": "tauri android build --apk --aab --ci",
-    "mobile:android:build:debug-apk": "tauri android build --debug --apk --ci",
+    "mobile:android:build:release": "tauri android build --apk --ci",
     "mobile:ios:init:ci": "tauri ios init --ci --skip-targets-install",
     "mobile:ios:dev": "tauri ios dev",
     "mobile:ios:build": "tauri ios build",
