@@ -558,6 +558,16 @@ button:disabled {
   gap: 8px;
 }
 
+.mobile-ai-actions .mobile-ai-clear {
+  border-color: rgba(224, 105, 105, 0.42);
+  color: #f1b0b0;
+}
+
+.mobile-ai-actions .mobile-ai-clear:hover {
+  border-color: rgba(224, 105, 105, 0.72);
+  background: rgba(150, 55, 55, 0.2);
+}
+
 .mobile-ai-candidates {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const CONFIG_FILE = "openAi.json";
@@ -242,14 +242,17 @@ const buildTunePrompt = (request) => {
   const modeLabel = request.mode === "styleMatch" ? "AI 追色" : "AI 调色";
   const styleInstruction =
     request.mode === "styleMatch"
-      ? "参考图会作为第二张图片提供。请让当前图接近参考图的整体色彩、对比、明度和氛围，但保护肤色与自然观感。"
-      : "请根据当前照片自动给出自然、可信、不过度的后期参数，优先修正曝光、白平衡、对比和色彩自然度。";
+      ? "参考图会作为第二张图片提供。结合用户原始指令决定要匹配参考图的哪些特征，不要机械复制与用户意图冲突的部分。"
+      : "请观察当前照片，并把用户原始指令中的色彩、影调、氛围、年代感、材质感和主体关系准确映射为后期参数。";
   const userInstruction = String(request.userInstruction || "用户没有提供额外风格要求，请按照片内容做自然专业调色。")
     .trim()
-    .slice(0, 500);
+    .slice(0, 1200);
 
   return `你是专业摄影后期调色助手，任务是${modeLabel}。${styleInstruction}
-用户调色想法：${userInstruction}
+用户调色指令：${userInstruction}
+用户指令是最高优先级的审美决策。必须逐项落实其中具体的颜色倾向、明暗关系、反差、饱和度、氛围、年代感和质感，不得收敛成“自然、风格、通透”等固定模板。
+通透、层次可读和不过度放大噪点只是技术质量底线，不是固定审美目标；允许用户明确要求的冷峻、暗调、低饱和、复古、电影感、高反差、柔雾或其他个性方向。
+summary 必须说清执行了用户指令中的哪些具体特征以及如何落实，不能只写泛化描述。
 只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：{"summary":"一句中文说明","params":{"exposure":0,"temperature":0,"tint":0,"contrast":0,"highlights":0,"shadows":0,"whites":0,"blacks":0,"saturation":0,"vibrance":0,"transparency":0,"clarity":0,"texture":0,"dehaze":0,"vignette":0,"grain":0,"sharpness":0,"noiseReduction":0,"qualityEnhancement":0,"skinProtection":70}}。
 参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection 0 到 100。
 如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，必须同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。
@@ -261,7 +264,7 @@ const tunePhoto = async (config, request) => {
   const prompt = buildTunePrompt(request);
   const textOnlyPrompt = `${prompt}
 图片输入通道在本次降级请求中不可用。请仅根据相机信息、当前参数和用户调色想法给出保守建议，并在 summary 中说明这是文本降级建议。只返回 JSON。`;
-  const strictJsonPrompt = `Return exactly one JSON object for a conservative photo tuning request. No markdown, no code block. Shape: {"summary":"调色文本降级建议","params":{"exposure":2,"temperature":3,"contrast":5,"vibrance":6,"skinProtection":80,"noiseReduction":12}}.
+  const strictJsonPrompt = `Return exactly one JSON object for a personalized photo color-grading request. No markdown or code block. The user's concrete aesthetic instruction has highest priority; do not replace it with generic natural/clean/transparent styling. Preserve technical quality without neutralizing distinctive dark, muted, cinematic, vintage, high-contrast, soft, cool, warm, or other requested aesthetics. The summary must name the concrete requested traits and params must visibly implement them. Shape: {"summary":"具体说明如何落实用户审美","params":{"exposure":2,"temperature":3,"contrast":5,"vibrance":6,"skinProtection":80,"noiseReduction":12}}.
 User instruction: ${request.userInstruction || ""}
 Asset: ${request.assetName}
 Camera summary: ${request.cameraSummary}
@@ -364,13 +367,21 @@ export const autophotoDevAiBridge = (root = process.cwd()) => ({
         if (req.method === "POST" && pathname === "/settings") {
           const body = await readJsonBody(req);
           const config = await writeLocalConfig(root, body.settings || body);
-          let modelList = { baseUrl: config.baseUrl, models: [] };
+          jsonResponse(res, 200, buildSettingsState(config, [config.model]));
+          return;
+        }
+        if (req.method === "DELETE" && pathname === "/settings") {
+          const config = await readLocalConfig(root);
           try {
-            modelList = await fetchModels(config);
-          } catch {
-            modelList = { baseUrl: config.baseUrl, models: [config.model] };
+            await unlink(config.configPath);
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
           }
-          jsonResponse(res, 200, buildSettingsState({ ...config, baseUrl: modelList.baseUrl }, modelList.models));
+          jsonResponse(res, 200, buildSettingsState({
+            apiKey: "",
+            baseUrl: DEFAULT_BASE_URL,
+            model: DEFAULT_MODEL
+          }));
           return;
         }
         if (req.method === "POST" && pathname === "/diagnose") {

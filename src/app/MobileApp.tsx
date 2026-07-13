@@ -13,6 +13,7 @@ import {
   RotateCw,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Wand2,
   Crop,
   Undo2,
@@ -24,7 +25,7 @@ import type { AiSettingsState, AiTuningResult, AutoAnalysis, EditParams, HslChan
 import type { PlatformCapabilities } from "../platform";
 import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams } from "../services/editParams";
 import { analyzeImage, createAutoEdit, formatFileSize, importPhotoFile, renderImageSourceWithEdits } from "../services/imageProcessing";
-import { diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, saveAiSettings, tunePhotoWithAi } from "../services/desktopBridge";
+import { clearAiSettings, diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, saveAiSettings, tunePhotoWithAi } from "../services/desktopBridge";
 
 interface MobileAppProps {
   capabilities: PlatformCapabilities;
@@ -289,111 +290,78 @@ const scaleAiEditParams = (baseline: EditParams, target: EditParams, scale: numb
 
 const createAiVariants = (baseline: EditParams, primary: EditParams, summary: string) => [
   {
-    idSuffix: "natural",
-    label: "方案 A · 自然校正",
-    summary: `${summary}（自然版：更保守，优先真实肤色和不过度。）`,
-    params: makeAiParamsSafe(
-      baseline,
-      mergeEditParams(blendAiEditParams(baseline, primary, 72), {
-        contrast: clamp(primary.contrast - 3, -50, 50),
-        saturation: clamp(primary.saturation - 5, -50, 50),
-        vibrance: clamp(primary.vibrance - 4, -50, 50),
-        transparency: clamp(primary.transparency + 4, 0, 100),
-        noiseReduction: clamp(primary.noiseReduction + 6, 0, 100),
-        qualityEnhancement: clamp(primary.qualityEnhancement + 4, 0, 100),
-        skinProtection: clamp(Math.max(primary.skinProtection, 82), 0, 100)
-      })
-    )
+    idSuffix: "subtle-intent",
+    label: "方案 A · 轻量表达",
+    summary: `${summary}（保留同一创作意图，以较轻强度呈现。）`,
+    params: scaleAiEditParams(baseline, primary, 0.78)
   },
   {
-    idSuffix: "expressive",
-    label: "方案 B · 风格增强",
-    summary: `${summary}（增强版：色彩和氛围更明显，适合想要更有风格的结果。）`,
-    params: makeAiParamsSafe(
-      baseline,
-      mergeEditParams(scaleAiEditParams(baseline, primary, 1.06), {
-        contrast: clamp(primary.contrast + 3, -50, 50),
-        saturation: clamp(primary.saturation + 2, -50, 50),
-        vibrance: clamp(primary.vibrance + 4, -50, 50),
-        transparency: clamp(primary.transparency + 8, 0, 100),
-        clarity: clamp(primary.clarity + 3, -50, 50),
-        dehaze: clamp(primary.dehaze + 4, -50, 50),
-        noiseReduction: clamp(primary.noiseReduction + 6, 0, 100),
-        qualityEnhancement: clamp(primary.qualityEnhancement + 8, 0, 100)
-      })
-    )
+    idSuffix: "faithful-intent",
+    label: "方案 B · 忠实表达",
+    summary: `${summary}（完整执行用户描述的色彩、影调和氛围方向。）`,
+    params: makeAiParamsSafe(baseline, primary)
   },
   {
-    idSuffix: "clean-detail",
-    label: "方案 C · 通透细节",
-    summary: `${summary}（通透版：更重视高光保护、阴影层次和细节清晰。）`,
-    params: makeAiParamsSafe(
-      baseline,
-      mergeEditParams(primary, {
-        exposure: clamp(primary.exposure + 2, -50, 50),
-        highlights: clamp(primary.highlights - 8, -60, 40),
-        shadows: clamp(primary.shadows + 8, -40, 60),
-        saturation: clamp(primary.saturation - 4, -50, 50),
-        vibrance: clamp(primary.vibrance - 2, -50, 50),
-        transparency: clamp(primary.transparency + 16, 0, 100),
-        clarity: clamp(primary.clarity + 6, -50, 50),
-        texture: clamp(primary.texture + 5, -50, 50),
-        dehaze: clamp(primary.dehaze + 8, -50, 50),
-        noiseReduction: clamp(primary.noiseReduction + 10, 0, 100),
-        qualityEnhancement: clamp(primary.qualityEnhancement + 14, 0, 100)
-      })
-    )
+    idSuffix: "bold-intent",
+    label: "方案 C · 强化表达",
+    summary: `${summary}（不改变创作方向，仅强化用户要求的个性化特征。）`,
+    params: scaleAiEditParams(baseline, primary, 1.16)
   }
 ];
 
 const enhanceAiInstruction = (instruction: string, analysis?: AutoAnalysis) => {
   const raw = instruction.trim();
-  const text = raw.toLowerCase();
-  const hasAny = (words: string[]) => words.some((word) => text.includes(word));
-  const additions: string[] = [];
-  if (!raw) additions.push("用户没有明确风格词，请根据照片内容做自然、专业、通透、不过度的基础调色");
-  if (raw.length > 0 && raw.length <= 12) additions.push("用户描述较笼统，请先判断主体、光线和场景，再转成具体调色参数");
-  if (hasAny(["自然", "真实", "舒服", "好看", "正常"])) additions.push("保持真实肤色和自然白平衡，避免高饱和、重 HDR、过度锐化和明显滤镜感");
-  if (hasAny(["通透", "清透", "干净", "空气", "明亮", "清新"])) additions.push("优先去灰雾、打开中间调和远景层次，保护高光白场，避免过锐和色彩断层");
-  if (hasAny(["清晰", "锐", "细节", "质感", "画质", "高清", "增强"])) additions.push("提升细节必须搭配降噪和画质增强，避免把暗部噪点和 JPEG 颗粒放大");
-  if (hasAny(["人像", "肤色", "皮肤", "脸", "portrait", "skin"])) additions.push("肤色优先自然健康，保护红橙色相，轻微柔化皮肤纹理");
-  if (hasAny(["风景", "风光", "天空", "山", "海", "森林"])) additions.push("保护天空高光和远景层次，增强自然色彩与局部通透度");
+  const observations: string[] = [];
   if (analysis) {
-    if (analysis.averageLuma < 86) additions.push("画面偏暗，优先提亮主体和阴影，谨慎拉高黑位");
-    if (analysis.averageLuma > 178) additions.push("画面偏亮，优先保护高光和白场层次");
-    if (analysis.shadowRatio > 0.18) additions.push("暗部区域较多，清晰度、去雾和锐化必须搭配降噪");
-    if (analysis.skinLikeRatio > 0.04) additions.push("检测到人像肤色候选，肤色保护权重需要高于整体风格化");
+    if (analysis.averageLuma < 86) observations.push("原片整体偏暗");
+    if (analysis.averageLuma > 178) observations.push("原片整体偏亮且需要留意高光容量");
+    if (analysis.shadowRatio > 0.18) observations.push("暗部占比较高，强行拉升时需兼顾噪点");
+    if (analysis.highlightRatio > 0.08) observations.push("高光占比较高，需避免剪切");
+    if (analysis.skinLikeRatio > 0.04) observations.push("画面可能包含肤色区域");
   }
   return [
-    raw ? `用户原始想法：${raw}` : undefined,
-    `增强后的执行要求：${additions.join("；")}`,
-    "输出参数必须保守、可回退、适合摄影后期；默认目标包含通透、干净、去灰、降噪和层次清晰，禁止用高饱和或硬锐化代替通透"
+    `用户原始指令（最高优先级，必须逐项落实）：${raw || "未提供具体指令，请依据画面内容做基础校正"}`,
+    "执行规则：先识别用户要求的色彩、影调、氛围、年代感、材质感和主体关系，再映射为参数；不得擅自把个性化描述替换成“自然、风格、通透”等泛化模板。",
+    observations.length ? `客观画面信息（只用于避免技术缺陷，不能覆盖用户审美）：${observations.join("；")}` : undefined,
+    "质量底线：保持可用的明暗层次和画面通透度，但通透只是技术质量约束，不是固定审美方向；允许冷峻、低饱和、暗调、复古、电影感、高反差等明确风格。summary 必须说明具体执行了用户指令中的哪些特征。"
   ]
     .filter(Boolean)
     .join("\n")
-    .slice(0, 700);
+    .slice(0, 1200);
 };
 
 const createLocalAiResult = (asset: PhotoAsset, analysis: AutoAnalysis, instruction: string): AiTuningResult => {
   const auto = createAutoEdit(asset, analysis).edits;
   const text = instruction.toLowerCase();
-  const airy = /通透|明亮|干净|清新|清透|去灰|透亮/.test(text) ? 1 : text.trim() ? 0.35 : 0.65;
   const portrait = /人像|肤色|皮肤|磨皮|美齿|portrait|skin/.test(text) || analysis.skinLikeRatio > 0.04;
+  const warm = /暖|夕阳|金色|橙黄|warm|golden/.test(text) ? 1 : /冷|蓝调|青色|清冷|cool|cyan/.test(text) ? -1 : 0;
+  const muted = /低饱和|去饱和|灰调|克制|褪色|muted|desaturat/.test(text);
+  const vivid = /鲜艳|浓郁|高饱和|多彩|vivid|colorful/.test(text);
+  const moody = /暗调|阴郁|情绪|冷峻|黑金|夜景|moody|dark/.test(text);
+  const bright = /明亮|高调|轻盈|清新|bright|high key/.test(text);
+  const film = /胶片|复古|怀旧|电影|港风|日系|film|vintage|cinematic/.test(text);
+  const soft = /柔和|柔焦|朦胧|奶油|低对比|soft|dreamy/.test(text);
+  const crisp = /硬朗|高反差|清晰|锐利|质感|crisp|dramatic/.test(text);
   return {
     model: "local-color-science",
-    summary: "本地调色候选：已增强用户想法，并基于图像统计和相机信息生成，可作为远端失败时的稳定回退。",
+    summary: `本地回退已按用户指令生成${film ? "胶片/电影质感" : "个性化"}候选，并保留基础画质约束。`,
     params: mergeEditParams(auto, {
-      exposure: clamp(auto.exposure + airy * 3, -50, 50),
-      shadows: clamp(auto.shadows + airy * 5, -40, 60),
-      whites: clamp(auto.whites + airy * 5, -40, 40),
-      blacks: clamp(auto.blacks - airy * 4, -40, 40),
-      transparency: clamp(auto.transparency + airy * (portrait ? 12 : 20), 0, 100),
-      clarity: clamp(auto.clarity + airy * (portrait ? 1 : 4), -50, 50),
-      texture: clamp(auto.texture + airy * (portrait ? 0 : 3) - (portrait ? 4 : 0), -50, 50),
-      dehaze: clamp(auto.dehaze + airy * (portrait ? 4 : 9), -50, 50),
-      sharpness: clamp(auto.sharpness + airy * (portrait ? 2 : 5), 0, 40),
-      noiseReduction: clamp(auto.noiseReduction + airy * (portrait ? 8 : 10), 0, 100),
-      qualityEnhancement: clamp(auto.qualityEnhancement + airy * (portrait ? 10 : 18), 0, 100),
+      exposure: clamp(auto.exposure + (bright ? 7 : 0) - (moody ? 7 : 0), -50, 50),
+      temperature: clamp(auto.temperature + warm * 12, -50, 50),
+      contrast: clamp(auto.contrast + (crisp || moody ? 10 : 0) - (soft ? 10 : 0), -50, 50),
+      highlights: clamp(auto.highlights - (film || moody ? 8 : 2), -60, 40),
+      shadows: clamp(auto.shadows + (bright ? 8 : 0) - (moody ? 6 : 0), -40, 60),
+      blacks: clamp(auto.blacks - (moody ? 10 : 0) + (film ? 5 : 0), -40, 40),
+      saturation: clamp(auto.saturation + (vivid ? 12 : 0) - (muted || film ? 10 : 0), -50, 50),
+      vibrance: clamp(auto.vibrance + (vivid ? 10 : 0) - (muted ? 6 : 0), -50, 50),
+      transparency: clamp(auto.transparency + 5, 0, 100),
+      clarity: clamp(auto.clarity + (crisp ? 7 : 0) - (soft || portrait ? 4 : 0), -50, 50),
+      texture: clamp(auto.texture + (crisp ? 5 : 0) - (soft || portrait ? 5 : 0), -50, 50),
+      dehaze: clamp(auto.dehaze + (moody || crisp ? 5 : 2), -50, 50),
+      vignette: clamp(auto.vignette + (film || moody ? 9 : 0), -50, 50),
+      grain: clamp(auto.grain + (film ? 12 : 0), 0, 50),
+      noiseReduction: clamp(auto.noiseReduction + 8, 0, 100),
+      qualityEnhancement: clamp(auto.qualityEnhancement + 10, 0, 100),
       skinProtection: clamp(Math.max(auto.skinProtection, portrait ? 84 : auto.skinProtection), 0, 100)
     })
   };
@@ -443,6 +411,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const [aiModelDraft, setAiModelDraft] = useState(defaultAiSettings.model);
   const [aiInstruction, setAiInstruction] = useState("");
   const [isSavingAiSettings, setIsSavingAiSettings] = useState(false);
+  const [isClearingAiSettings, setIsClearingAiSettings] = useState(false);
   const [isDiagnosingAi, setIsDiagnosingAi] = useState(false);
   const [isAiRunning, setIsAiRunning] = useState(false);
   const [aiCandidates, setAiCandidates] = useState<MobileAiCandidate[]>([]);
@@ -794,6 +763,26 @@ export function MobileApp({ capabilities }: MobileAppProps) {
     }
   };
 
+  const clearMobileAiSettings = async () => {
+    if (!isAiRuntimeAvailable()) {
+      setStatus("AI 设置需要 Tauri 真机环境或本地开发调试桥");
+      return;
+    }
+    setIsClearingAiSettings(true);
+    try {
+      const settings = await clearAiSettings();
+      setAiSettings(settings);
+      setAiApiKeyDraft("");
+      setAiBaseUrlDraft(settings.baseUrl);
+      setAiModelDraft(settings.model);
+      setStatus("AI 配置文件已清空");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "AI 配置清空失败");
+    } finally {
+      setIsClearingAiSettings(false);
+    }
+  };
+
   const runMobileAiTuning = async () => {
     if (!asset) {
       setStatus("请先选择 JPG 图片");
@@ -807,7 +796,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       aiBaselineRef.current = baseline;
       const analysis = await analyzeImage(asset);
       const enhancedInstruction = enhanceAiInstruction(aiInstruction, analysis);
-      const localResult = createLocalAiResult(asset, analysis, enhancedInstruction);
+      const localResult = createLocalAiResult(asset, analysis, aiInstruction);
       let result: AiTuningResult = localResult;
       let fallbackReason = "";
 
@@ -818,22 +807,21 @@ export function MobileApp({ capabilities }: MobileAppProps) {
             quality: 0.82,
             orientation: asset.metadata.orientation
           });
-          const localBase = normalizeAiResultParams(baseline, localResult);
           const remoteResult = await tunePhotoWithAi({
             mode: "autoColor",
             assetName: asset.name,
             cameraSummary: [
               getCameraSummary(asset, analysis),
-              "请把本地色彩科学候选作为基线，只返回安全增量；避免高饱和、硬锐化、色彩溢出和断层。"
+              "用户原始指令是审美决策的最高优先级；画面分析只用于避免高光剪切、噪点放大和色彩断层。"
             ].join("\n"),
             imageDataUrl,
             userInstruction: enhancedInstruction,
-            currentParams: localBase
+            currentParams: baseline
           });
           result = {
             model: remoteResult.model,
-            summary: `${remoteResult.summary}；已叠加本地色彩科学基线。`,
-            params: normalizeAiResultParams(localBase, remoteResult)
+            summary: remoteResult.summary,
+            params: normalizeAiResultParams(baseline, remoteResult)
           };
         } catch (error) {
           fallbackReason = error instanceof Error ? error.message : "远端 AI 请求失败";
@@ -919,7 +907,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       <div className="mobile-ai-settings">
         <label>
           <span>API key</span>
-          <input type="password" value={aiApiKeyDraft} onChange={(event) => setAiApiKeyDraft(event.target.value)} placeholder={aiSettings.hasApiKey ? "已保存，留空不修改" : "输入后保存到系统安全存储"} />
+          <input type="password" value={aiApiKeyDraft} onChange={(event) => setAiApiKeyDraft(event.target.value)} placeholder={aiSettings.hasApiKey ? "已保存，留空不修改" : "输入后保存到应用配置文件"} />
         </label>
         <label>
           <span>Base URL</span>
@@ -942,6 +930,10 @@ export function MobileApp({ capabilities }: MobileAppProps) {
           <button type="button" onClick={diagnoseMobileAi} disabled={isDiagnosingAi}>
             {isDiagnosingAi ? <Loader2 className="spin" size={18} /> : <Wand2 size={18} />}
             诊断
+          </button>
+          <button type="button" className="mobile-ai-clear" onClick={clearMobileAiSettings} disabled={isClearingAiSettings || isSavingAiSettings}>
+            {isClearingAiSettings ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}
+            清空配置
           </button>
         </div>
       </div>

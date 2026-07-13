@@ -135,6 +135,8 @@ struct AiSettingsInput {
 struct AiStoredSettings {
     model: String,
     base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -158,7 +160,6 @@ struct AiConnectionDiagnostic {
 }
 
 struct AiModelList {
-    base_url: String,
     models: Vec<String>,
 }
 
@@ -190,6 +191,7 @@ fn default_ai_settings() -> AiStoredSettings {
     AiStoredSettings {
         model: DEFAULT_AI_MODEL.to_string(),
         base_url: DEFAULT_AI_BASE_URL.to_string(),
+        api_key: None,
     }
 }
 
@@ -287,6 +289,10 @@ fn normalize_ai_stored_settings(settings: AiStoredSettings) -> AiStoredSettings 
     AiStoredSettings {
         model: normalize_ai_model(Some(&settings.model)),
         base_url: normalize_ai_url(&settings.base_url),
+        api_key: settings
+            .api_key
+            .map(|api_key| api_key.trim().to_string())
+            .filter(|api_key| !api_key.is_empty()),
     }
 }
 
@@ -332,8 +338,9 @@ fn save_ai_api_key(_app: &tauri::AppHandle, api_key: &str) -> Result<(), String>
 
 #[cfg(target_os = "android")]
 fn save_ai_api_key(app: &tauri::AppHandle, api_key: &str) -> Result<(), String> {
-    fs::write(ai_api_key_path(app)?, api_key)
-        .map_err(|error| format!("API key 写入安卓应用私有存储失败：{error}"))
+    let mut settings = load_stored_ai_settings(app);
+    settings.api_key = Some(api_key.trim().to_string());
+    save_stored_ai_settings(app, &settings)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -352,8 +359,12 @@ fn load_ai_api_key(_app: &tauri::AppHandle) -> Result<String, String> {
 
 #[cfg(target_os = "android")]
 fn load_ai_api_key(app: &tauri::AppHandle) -> Result<String, String> {
-    let api_key = fs::read_to_string(ai_api_key_path(app)?)
-        .map_err(|_| "请先在 AI 设置中保存 API key".to_string())?;
+    let settings = load_stored_ai_settings(app);
+    let api_key = match settings.api_key {
+        Some(api_key) => api_key,
+        None => fs::read_to_string(ai_api_key_path(app)?)
+            .map_err(|_| "请先在 AI 设置中保存 API key".to_string())?,
+    };
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
         return Err("请先在 AI 设置中保存 API key".to_string());
@@ -450,10 +461,7 @@ fn fetch_ai_models(base_url: &str, api_key: &str) -> Result<AiModelList, String>
             .map_err(|_| "AI 模型列表响应格式无效".to_string())?;
         let models = parse_ai_models_response(response_json);
         if !models.is_empty() {
-            return Ok(AiModelList {
-                base_url: candidate,
-                models,
-            });
+            return Ok(AiModelList { models });
         }
     }
 
@@ -474,16 +482,6 @@ fn build_ai_settings_state(
         base_url: settings.base_url,
         has_api_key,
         available_models,
-    }
-}
-
-fn available_ai_models_with_saved_fallback(
-    settings: &AiStoredSettings,
-    model_list: Result<AiModelList, String>,
-) -> Vec<String> {
-    match model_list {
-        Ok(model_list) if !model_list.models.is_empty() => model_list.models,
-        _ => vec![settings.model.clone()],
     }
 }
 
@@ -548,9 +546,7 @@ fn get_ai_settings(app: tauri::AppHandle) -> Result<AiSettingsState, String> {
     let settings = load_stored_ai_settings(&app);
     let has_api_key = has_ai_api_key(&app);
     let available_models = if has_api_key {
-        let model_list =
-            load_ai_api_key(&app).and_then(|api_key| fetch_ai_models(&settings.base_url, &api_key));
-        available_ai_models_with_saved_fallback(&settings, model_list)
+        vec![settings.model.clone()]
     } else {
         Vec::new()
     };
@@ -575,42 +571,49 @@ fn save_ai_settings(
 
     let base_url = normalize_ai_url(&settings.base_url);
     let requested_model = normalize_ai_model(settings.model.as_deref());
-    let mut normalized = AiStoredSettings {
+    #[cfg(target_os = "android")]
+    let stored_api_key = load_ai_api_key(&app).ok();
+    #[cfg(not(target_os = "android"))]
+    let stored_api_key = None;
+    let normalized = AiStoredSettings {
         model: requested_model,
         base_url,
+        api_key: stored_api_key,
     };
     save_stored_ai_settings(&app, &normalized)?;
-
-    let api_key = load_ai_api_key(&app)?;
-    let available_models = match fetch_ai_models(&normalized.base_url, &api_key) {
-        Ok(model_list) => {
-            normalized.base_url = model_list.base_url;
-            if !model_list
-                .models
-                .iter()
-                .any(|model| model == &normalized.model)
-            {
-                normalized.model = if model_list
-                    .models
-                    .iter()
-                    .any(|model| model == DEFAULT_AI_MODEL)
-                {
-                    DEFAULT_AI_MODEL.to_string()
-                } else {
-                    model_list
-                        .models
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| normalized.model.clone())
-                };
-            }
-            save_stored_ai_settings(&app, &normalized)?;
-            model_list.models
-        }
-        Err(_) => vec![normalized.model.clone()],
-    };
-
+    load_ai_api_key(&app)?;
+    let available_models = vec![normalized.model.clone()];
     Ok(build_ai_settings_state(normalized, true, available_models))
+}
+
+#[tauri::command]
+fn clear_ai_settings(app: tauri::AppHandle) -> Result<AiSettingsState, String> {
+    let settings_path = ai_settings_path(&app)?;
+    if let Err(error) = fs::remove_file(settings_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("无法清空 AI 配置文件：{error}"));
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        if let Err(error) = fs::remove_file(ai_api_key_path(&app)?) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("无法清空旧版 AI key 文件：{error}"));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    if let Ok(entry) = keyring_entry() {
+        let _ = entry.delete_credential();
+    }
+
+    Ok(build_ai_settings_state(
+        default_ai_settings(),
+        false,
+        Vec::new(),
+    ))
 }
 
 #[tauri::command]
@@ -920,25 +923,28 @@ fn tune_photo_with_openai(
         "AI 调色"
     };
     let style_instruction = if request.mode == "styleMatch" {
-        "参考图会作为第二张图片提供。请让当前图接近参考图的整体色彩、对比、明度和氛围，但保护肤色与自然观感。"
+        "参考图会作为第二张图片提供。结合用户原始指令决定要匹配参考图的哪些特征，不要机械复制与用户意图冲突的部分。"
     } else {
-        "请根据当前照片自动给出自然、可信、不过度的后期参数，优先修正曝光、白平衡、对比和色彩自然度。"
+        "请观察当前照片，并把用户原始指令中的色彩、影调、氛围、年代感、材质感和主体关系准确映射为后期参数。"
     };
     let user_instruction = request
         .user_instruction
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(500).collect::<String>())
+        .map(|value| value.chars().take(1200).collect::<String>())
         .unwrap_or_else(|| "用户没有提供额外风格要求，请按照片内容做自然专业调色。".to_string());
     let prompt = format!(
     "你是专业摄影后期调色助手，任务是{}。{}\
-    用户调色想法：{}\
+    用户调色指令：{}\
+    用户指令是最高优先级的审美决策。必须先逐项识别并执行其中具体的颜色倾向、明暗关系、反差、饱和度、氛围、年代感和质感；不得把它改写或收敛成“自然、风格、通透”等固定模板。\
+    画面通透、层次可读和不过度放大噪点只是技术质量底线，不是固定审美目标；只要用户明确要求，就允许冷峻、暗调、低饱和、复古、电影感、高反差、柔雾或其他个性方向。\
+    summary 必须复述用户要求中的具体审美特征，并说明参数如何落实；如果 summary 只写泛化的自然、风格或通透，视为不合格。\
     只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：\
     {{\"summary\":\"一句中文说明\",\"params\":{{\"exposure\":0,\"temperature\":0,\"tint\":0,\"contrast\":0,\"highlights\":0,\"shadows\":0,\"whites\":0,\"blacks\":0,\"saturation\":0,\"vibrance\":0,\"transparency\":0,\"clarity\":0,\"texture\":0,\"dehaze\":0,\"vignette\":0,\"grain\":0,\"sharpness\":0,\"noiseReduction\":0,\"qualityEnhancement\":0,\"skinProtection\":70}}}}。\
     参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；\
     highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection 0 到 100。\
-    如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，必须同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。\
+    在不削弱用户审美方向的前提下，如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，应同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。\
     可省略不需要修改的字段。不要猜测人物身份。文件名：{}。相机信息：{}。当前参数：{}。",
     mode_label,
     style_instruction,
@@ -958,12 +964,12 @@ fn tune_photo_with_openai(
     };
     let strict_json_prompt = if request.mode == "styleMatch" {
         format!(
-            "Return exactly one JSON object for a conservative photo style-match tuning request. No markdown, no code block. Use the user instruction, camera summary, current params, and saved reference style summary below. The result must contain at least one non-zero numeric edit field. Shape: {{\"summary\":\"追色文本降级建议\",\"params\":{{\"exposure\":2,\"temperature\":4,\"contrast\":6,\"vibrance\":5,\"skinProtection\":78}}}}.\nUser instruction: {}\nAsset: {}\nCamera summary: {}\nCurrent params: {}",
+            "Return exactly one JSON object for a personalized photo style-match request. No markdown or code block. The user's concrete aesthetic instruction has highest priority; do not replace it with generic natural/clean/transparent styling. Preserve technical image quality without neutralizing requested dark, muted, cinematic, vintage, high-contrast, soft, cool, warm, or other distinctive aesthetics. The summary must name the concrete requested traits and the params must visibly implement them. The result must contain at least one non-zero numeric edit field. Shape: {{\"summary\":\"具体说明如何落实用户审美\",\"params\":{{\"exposure\":2,\"temperature\":4,\"contrast\":6,\"vibrance\":5,\"skinProtection\":78}}}}.\nUser instruction: {}\nAsset: {}\nCamera summary: {}\nCurrent params: {}",
             user_instruction, request.asset_name, request.camera_summary, request.current_params
         )
     } else {
         format!(
-            "Return exactly one JSON object for a conservative photo auto-color tuning request. No markdown, no code block. Use the user instruction, camera summary, and current params below. The result must contain at least one non-zero numeric edit field. Shape: {{\"summary\":\"调色文本降级建议\",\"params\":{{\"exposure\":2,\"temperature\":3,\"contrast\":5,\"vibrance\":6,\"skinProtection\":80}}}}.\nUser instruction: {}\nAsset: {}\nCamera summary: {}\nCurrent params: {}",
+            "Return exactly one JSON object for a personalized photo color-grading request. No markdown or code block. The user's concrete aesthetic instruction has highest priority; do not replace it with generic natural/clean/transparent styling. Preserve technical image quality without neutralizing requested dark, muted, cinematic, vintage, high-contrast, soft, cool, warm, or other distinctive aesthetics. The summary must name the concrete requested traits and the params must visibly implement them. The result must contain at least one non-zero numeric edit field. Shape: {{\"summary\":\"具体说明如何落实用户审美\",\"params\":{{\"exposure\":2,\"temperature\":3,\"contrast\":5,\"vibrance\":6,\"skinProtection\":80}}}}.\nUser instruction: {}\nAsset: {}\nCamera summary: {}\nCurrent params: {}",
             user_instruction, request.asset_name, request.camera_summary, request.current_params
         )
     };
@@ -2036,6 +2042,7 @@ pub fn run() {
             clear_export_jobs,
             get_ai_settings,
             save_ai_settings,
+            clear_ai_settings,
             diagnose_ai_connection,
             tune_photo_with_openai
         ])
@@ -2372,48 +2379,15 @@ mod tests {
     }
 
     #[test]
-    fn ai_settings_models_use_fetched_list_when_available() {
-        let settings = AiStoredSettings {
-            model: "saved-model".to_string(),
-            base_url: "https://example.test/v1".to_string(),
-        };
-
-        let models = available_ai_models_with_saved_fallback(
-            &settings,
-            Ok(AiModelList {
-                base_url: settings.base_url.clone(),
-                models: vec!["remote-a".to_string(), "remote-b".to_string()],
-            }),
-        );
-
-        assert_eq!(models, vec!["remote-a".to_string(), "remote-b".to_string()]);
-    }
-
-    #[test]
-    fn ai_settings_models_fall_back_to_saved_model_when_fetch_fails() {
-        let settings = AiStoredSettings {
-            model: "saved-model".to_string(),
-            base_url: "https://example.test/v1".to_string(),
-        };
-
-        let models = available_ai_models_with_saved_fallback(
-            &settings,
-            Err("network unavailable".to_string()),
-        );
-
-        assert_eq!(models, vec!["saved-model".to_string()]);
-    }
-
-    #[test]
     fn ai_connection_diagnostic_reports_safe_model_status() {
         let passed = build_ai_connection_diagnostic(
             AiStoredSettings {
                 model: "selected-model".to_string(),
                 base_url: "https://private.example.test/v1".to_string(),
+                api_key: None,
             },
             true,
             Ok(AiModelList {
-                base_url: "https://private.example.test/v1".to_string(),
                 models: vec!["selected-model".to_string(), "other-model".to_string()],
             }),
         );
@@ -2427,10 +2401,10 @@ mod tests {
             AiStoredSettings {
                 model: "selected-model".to_string(),
                 base_url: "https://private.example.test/v1".to_string(),
+                api_key: None,
             },
             true,
             Ok(AiModelList {
-                base_url: "https://private.example.test/v1".to_string(),
                 models: vec!["other-model".to_string()],
             }),
         );
@@ -2445,6 +2419,7 @@ mod tests {
             AiStoredSettings {
                 model: "selected-model".to_string(),
                 base_url: "https://private.example.test/v1".to_string(),
+                api_key: None,
             },
             false,
             Err("AI key 尚未保存".to_string()),
@@ -2470,7 +2445,8 @@ mod tests {
             &settings_path,
             serde_json::json!({
                 "model": "  gpt-5.5  ",
-                "baseUrl": "https://example.test/v1/models?api_key=must-not-keep"
+                "baseUrl": "https://example.test/v1/models?api_key=must-not-keep",
+                "apiKey": "  saved-mobile-key  "
             })
             .to_string(),
         )
@@ -2480,6 +2456,7 @@ mod tests {
 
         assert_eq!(settings.model, DEFAULT_AI_MODEL);
         assert_eq!(settings.base_url, "https://example.test/v1");
+        assert_eq!(settings.api_key.as_deref(), Some("saved-mobile-key"));
         fs::remove_dir_all(root).expect("ai settings temp dir should be removed");
     }
 

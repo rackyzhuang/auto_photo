@@ -33,7 +33,7 @@ export const isAiRuntimeAvailable = () => isTauriRuntime() || isDevAiBridgeRunti
 const requestDevAiBridge = async <Response>(
   path: string,
   options?: {
-    method?: "GET" | "POST";
+    method?: "GET" | "POST" | "DELETE";
     body?: unknown;
   }
 ): Promise<Response> => {
@@ -217,6 +217,15 @@ export const saveAiSettings = async (settings: {
   return invoke<AiSettingsState>("save_ai_settings", {
     settings
   });
+};
+
+export const clearAiSettings = async (): Promise<AiSettingsState> => {
+  if (isDevAiBridgeRuntime()) {
+    return requestDevAiBridge<AiSettingsState>("settings", {
+      method: "DELETE"
+    });
+  }
+  return invoke<AiSettingsState>("clear_ai_settings");
 };
 
 export const diagnoseAiConnection = async (): Promise<AiConnectionDiagnostic> => {
