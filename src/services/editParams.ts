@@ -45,12 +45,35 @@ export const createDefaultEditParams = (): EditParams => ({
   noiseReduction: 0,
   qualityEnhancement: 0,
   skinProtection: 65,
+  faceSlimming: 0,
+  bodySlimming: 0,
+  eyeEnlargement: 0,
+  wrinkleReduction: 0,
+  skinToneUniformity: 0,
   skinSmoothing: 0,
   skinTone: 0,
   teethWhitening: 0,
   clothingWrinkleReduction: 0,
   hsl: Object.fromEntries(hslChannels.map((channel) => [channel, neutralHsl()])) as EditParams["hsl"]
 });
+
+export const portraitBeautyQuickEdits = {
+  evenSkin: {
+    skinProtection: 90,
+    skinToneUniformity: 62,
+    skinTone: 6
+  },
+  naturalBeauty: {
+    skinProtection: 92,
+    faceSlimming: 18,
+    eyeEnlargement: 12,
+    wrinkleReduction: 30,
+    skinToneUniformity: 46,
+    skinSmoothing: 34,
+    skinTone: 7,
+    teethWhitening: 14
+  }
+} satisfies Record<string, Partial<EditParams>>;
 
 export const normalizeEditParams = (params?: Partial<EditParams>): EditParams => {
   const defaults = createDefaultEditParams();

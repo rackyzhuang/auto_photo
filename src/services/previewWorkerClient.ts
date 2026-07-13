@@ -1,5 +1,6 @@
 import type { EditParams, ExportSettings, PhotoAsset } from "../types";
 import { renderEditedPreview } from "./imageProcessing";
+import { needsPortraitAnalysis } from "./portraitBeautify";
 
 interface WorkerResponse {
   id: number;
@@ -75,6 +76,7 @@ export const renderPreviewWithWorkerFallback = async (
 ) => {
   if (!asset.isEditable) throw new Error("RAW preview rendering is not connected yet");
   if (options.signal?.aborted) throw createPreviewAbortError();
+  if (needsPortraitAnalysis(edits)) return renderEditedPreview(asset, edits, options);
   const previewWorker = getWorker();
   if (!previewWorker) return renderEditedPreview(asset, edits, options);
 

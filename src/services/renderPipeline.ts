@@ -1,4 +1,5 @@
 import type { EditParams } from "../types";
+import type { PortraitAnalysis } from "./portraitBeautify";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -298,15 +299,81 @@ const isTeethLikePixel = (red: number, green: number, blue: number) => {
   return luma > 118 && max - min < 72 && red >= blue - 10 && green >= blue - 18;
 };
 
-const applyPortraitRetouch = (imageData: ImageData, edits: EditParams) => {
+const applyPortraitRetouch = (imageData: ImageData, edits: EditParams, portraitAnalysis?: PortraitAnalysis) => {
   const skinSmoothing = clamp(edits.skinSmoothing / 100, 0, 1);
   const skinTone = clamp(edits.skinTone / 100, -1, 1);
+  const wrinkleReduction = clamp(edits.wrinkleReduction / 100, 0, 1);
+  const skinToneUniformity = clamp(edits.skinToneUniformity / 100, 0, 1);
   const teethWhitening = clamp(edits.teethWhitening / 100, 0, 1);
   const clothingWrinkleReduction = clamp(edits.clothingWrinkleReduction / 100, 0, 1);
-  if (skinSmoothing <= 0 && skinTone === 0 && teethWhitening <= 0 && clothingWrinkleReduction <= 0) return imageData;
+  if (
+    skinSmoothing <= 0 &&
+    skinTone === 0 &&
+    wrinkleReduction <= 0 &&
+    skinToneUniformity <= 0 &&
+    teethWhitening <= 0 &&
+    clothingWrinkleReduction <= 0
+  ) return imageData;
 
   const { data, width, height } = imageData;
   const source = new Uint8ClampedArray(data);
+  const faceRegions = (portraitAnalysis?.faces ?? [])
+    .map((face) => {
+      const xs = face.map((landmark) => landmark.x * width);
+      const ys = face.map((landmark) => landmark.y * height);
+      if (xs.length === 0 || ys.length === 0) return undefined;
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      return {
+        centerX: (minX + maxX) / 2,
+        centerY: (minY + maxY) / 2,
+        radiusX: Math.max(1, (maxX - minX) * 0.54),
+        radiusY: Math.max(1, (maxY - minY) * 0.53)
+      };
+    })
+    .filter((region): region is NonNullable<typeof region> => Boolean(region));
+  const getFaceWeight = (x: number, y: number) => {
+    let weight = 0;
+    faceRegions.forEach((region) => {
+      const dx = (x - region.centerX) / region.radiusX;
+      const dy = (y - region.centerY) / region.radiusY;
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared < 1) weight = Math.max(weight, (1 - distanceSquared) * (1 - distanceSquared));
+    });
+    return weight;
+  };
+
+  let skinTargetRed = 0;
+  let skinTargetGreen = 0;
+  let skinTargetBlue = 0;
+  let skinTargetLuma = 0;
+  let skinTargetWeight = 0;
+  if (skinToneUniformity > 0 && faceRegions.length > 0) {
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = (y * width + x) * 4;
+        const red = source[index];
+        const green = source[index + 1];
+        const blue = source[index + 2];
+        if (!isSkinLikePixel(red, green, blue)) continue;
+        const weight = getFaceWeight(x, y);
+        if (weight <= 0) continue;
+        skinTargetRed += red * weight;
+        skinTargetGreen += green * weight;
+        skinTargetBlue += blue * weight;
+        skinTargetLuma += getLuma(red, green, blue) * weight;
+        skinTargetWeight += weight;
+      }
+    }
+    if (skinTargetWeight > 0) {
+      skinTargetRed /= skinTargetWeight;
+      skinTargetGreen /= skinTargetWeight;
+      skinTargetBlue /= skinTargetWeight;
+      skinTargetLuma /= skinTargetWeight;
+    }
+  }
 
   for (let y = 1; y < height - 1; y += 1) {
     for (let x = 1; x < width - 1; x += 1) {
@@ -317,6 +384,7 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams) => {
       const luma = getLuma(red, green, blue);
       const skinMask = isSkinLikePixel(red, green, blue) ? 1 : 0;
       const teethMask = isTeethLikePixel(red, green, blue) && !skinMask ? 1 : 0;
+      const faceWeight = wrinkleReduction > 0 || skinToneUniformity > 0 ? getFaceWeight(x, y) : 0;
 
       let blurRed = 0;
       let blurGreen = 0;
@@ -345,10 +413,24 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams) => {
       let nextBlue = data[index + 2];
 
       if (skinMask > 0) {
-        const smoothAmount = skinSmoothing * 0.62;
+        const blurLuma = getLuma(blurRed, blurGreen, blurBlue);
+        const wrinkleMask = clamp((Math.abs(luma - blurLuma) - 1.5) / 16, 0, 1);
+        const wrinkleAmount = wrinkleReduction * faceWeight * (0.28 + wrinkleMask * 0.5);
+        const smoothAmount = clamp(skinSmoothing * 0.62 + wrinkleAmount, 0, 0.84);
         nextRed = nextRed * (1 - smoothAmount) + blurRed * smoothAmount;
         nextGreen = nextGreen * (1 - smoothAmount) + blurGreen * smoothAmount;
         nextBlue = nextBlue * (1 - smoothAmount) + blurBlue * smoothAmount;
+
+        if (skinToneUniformity > 0 && faceWeight > 0 && skinTargetWeight > 0) {
+          const localLumaOffset = luma - skinTargetLuma;
+          const uniformAmount = skinToneUniformity * faceWeight * 0.58;
+          const targetRed = skinTargetRed + localLumaOffset * 0.88;
+          const targetGreen = skinTargetGreen + localLumaOffset * 0.94;
+          const targetBlue = skinTargetBlue + localLumaOffset * 0.9;
+          nextRed = nextRed * (1 - uniformAmount) + targetRed * uniformAmount;
+          nextGreen = nextGreen * (1 - uniformAmount) + targetGreen * uniformAmount;
+          nextBlue = nextBlue * (1 - uniformAmount) + targetBlue * uniformAmount;
+        }
 
         if (skinTone !== 0) {
           const toneAmount = skinTone * 9;
@@ -457,7 +539,7 @@ const applyVignetteAndGrain = (imageData: ImageData, vignette: number, grain: nu
   return imageData;
 };
 
-export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
+export const applyEditPipeline = (imageData: ImageData, edits: EditParams, portraitAnalysis?: PortraitAnalysis) => {
   const data = imageData.data;
   const exposureGain = 1 + edits.exposure / 100;
   const contrast = 1 + edits.contrast / 100;
@@ -534,7 +616,7 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams) => {
   applyNoiseReduction(imageData, Math.max(edits.noiseReduction, edits.qualityEnhancement * 0.22));
   applyTransparencyDetail(imageData, edits.transparency, edits.skinProtection);
   applyLocalDetail(imageData, edits.clarity, edits.texture);
-  applyPortraitRetouch(imageData, edits);
+  applyPortraitRetouch(imageData, edits, portraitAnalysis);
   applyQualityEnhancement(imageData, edits.qualityEnhancement, edits.skinProtection);
   applySharpening(imageData, edits.sharpness);
   applyVignetteAndGrain(imageData, edits.vignette, edits.grain);

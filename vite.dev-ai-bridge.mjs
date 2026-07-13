@@ -26,6 +26,11 @@ const KNOWN_AI_PARAMS = new Set([
   "noiseReduction",
   "qualityEnhancement",
   "skinProtection",
+  "faceSlimming",
+  "bodySlimming",
+  "eyeEnlargement",
+  "wrinkleReduction",
+  "skinToneUniformity",
   "skinSmoothing",
   "skinTone",
   "teethWhitening",
@@ -253,8 +258,8 @@ const buildTunePrompt = (request) => {
 用户指令是最高优先级的审美决策。必须逐项落实其中具体的颜色倾向、明暗关系、反差、饱和度、氛围、年代感和质感，不得收敛成“自然、风格、通透”等固定模板。
 通透、层次可读和不过度放大噪点只是技术质量底线，不是固定审美目标；允许用户明确要求的冷峻、暗调、低饱和、复古、电影感、高反差、柔雾或其他个性方向。
 summary 必须说清执行了用户指令中的哪些具体特征以及如何落实，不能只写泛化描述。
-只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：{"summary":"一句中文说明","params":{"exposure":0,"temperature":0,"tint":0,"contrast":0,"highlights":0,"shadows":0,"whites":0,"blacks":0,"saturation":0,"vibrance":0,"transparency":0,"clarity":0,"texture":0,"dehaze":0,"vignette":0,"grain":0,"sharpness":0,"noiseReduction":0,"qualityEnhancement":0,"skinProtection":70}}。
-参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection 0 到 100。
+  只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：{"summary":"一句中文说明","params":{"exposure":0,"temperature":0,"tint":0,"contrast":0,"highlights":0,"shadows":0,"whites":0,"blacks":0,"saturation":0,"vibrance":0,"transparency":0,"clarity":0,"texture":0,"dehaze":0,"vignette":0,"grain":0,"sharpness":0,"noiseReduction":0,"qualityEnhancement":0,"skinProtection":70,"faceSlimming":0,"bodySlimming":0,"eyeEnlargement":0,"wrinkleReduction":0,"skinToneUniformity":0}}。
+  参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection/faceSlimming/bodySlimming/eyeEnlargement/wrinkleReduction/skinToneUniformity 0 到 100。
 如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，必须同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。
 可省略不需要修改的字段。不要猜测人物身份。文件名：${request.assetName}。相机信息：${request.cameraSummary}。当前参数：${JSON.stringify(request.currentParams)}。`;
 };

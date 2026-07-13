@@ -255,8 +255,8 @@ button:disabled {
 
 .mobile-toolbar {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
   padding: 10px 10px 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   background: #141920;
@@ -274,7 +274,7 @@ button:disabled {
   border-radius: 10px;
   color: #dbe8f5;
   background: transparent;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .mobile-toolbar button:not(:disabled):active {
@@ -501,10 +501,15 @@ button:disabled {
 }
 
 .mobile-segment-row,
-.mobile-rotate-row {
+.mobile-rotate-row,
+.mobile-beauty-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.mobile-beauty-actions button {
+  flex: 1 1 130px;
 }
 
 .mobile-segment-row button.active {
@@ -1872,7 +1877,8 @@ h2 {
 
 .geometry-actions,
 .crop-command-row,
-.reference-actions {
+.reference-actions,
+.portrait-quick-actions {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
@@ -1880,7 +1886,8 @@ h2 {
 
 .geometry-actions button,
 .crop-command-row button,
-.reference-actions button {
+.reference-actions button,
+.portrait-quick-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1895,8 +1902,14 @@ h2 {
 
 .geometry-actions button:hover,
 .crop-command-row button:hover,
-.reference-actions button:hover {
+.reference-actions button:hover,
+.portrait-quick-actions button:hover {
   border-color: rgba(143, 191, 232, 0.5);
+}
+
+.portrait-quick-actions {
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
 }
 
 .crop-ratio-grid {

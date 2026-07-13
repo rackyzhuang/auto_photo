@@ -55,7 +55,7 @@ import type {
   WatermarkPosition,
   WorkflowSettings
 } from "./types";
-import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams } from "./services/editParams";
+import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams, portraitBeautyQuickEdits } from "./services/editParams";
 import { cropAspectOptions, normalizeRotationDegrees } from "./services/geometry";
 import {
   analyzeImage,
@@ -139,6 +139,11 @@ const enhancementControls: EditControl[] = [
 ];
 
 const portraitControls: EditControl[] = [
+  { key: "faceSlimming", label: "瘦脸", min: 0, max: 100 },
+  { key: "bodySlimming", label: "瘦身", min: 0, max: 100 },
+  { key: "eyeEnlargement", label: "大眼", min: 0, max: 100 },
+  { key: "wrinkleReduction", label: "面部去皱", min: 0, max: 100 },
+  { key: "skinToneUniformity", label: "统一肤色", min: 0, max: 100 },
   { key: "skinSmoothing", label: "磨皮", min: 0, max: 100 },
   { key: "skinTone", label: "润色", min: -50, max: 50 },
   { key: "teethWhitening", label: "美齿", min: 0, max: 100 },
@@ -539,6 +544,11 @@ const AI_SAFE_PARAM_LIMITS: Partial<Record<NumericEditParamKey, { min: number; m
   noiseReduction: { min: 0, max: 64, delta: 36 },
   qualityEnhancement: { min: 0, max: 58, delta: 34 },
   skinProtection: { min: 60, max: 96, delta: 28 },
+  faceSlimming: { min: 0, max: 38, delta: 24 },
+  bodySlimming: { min: 0, max: 34, delta: 22 },
+  eyeEnlargement: { min: 0, max: 30, delta: 20 },
+  wrinkleReduction: { min: 0, max: 52, delta: 32 },
+  skinToneUniformity: { min: 0, max: 68, delta: 42 },
   skinSmoothing: { min: 0, max: 45, delta: 24 },
   skinTone: { min: -18, max: 18, delta: 14 },
   teethWhitening: { min: 0, max: 42, delta: 22 },
@@ -2006,6 +2016,13 @@ export function App() {
     commitSelectedEdits(mergeEditParams(selectedAsset.edits, preset.params), [`应用预设：${preset.name}`], {
       presetId: preset.id
     });
+  };
+
+  const applyPortraitQuickEdit = (mode: keyof typeof portraitBeautyQuickEdits) => {
+    if (!selectedAsset || !selectedAssetPreviewEditable) return;
+    const label = mode === "evenSkin" ? "一键统一肤色" : "一键美颜";
+    commitSelectedEdits(mergeEditParams(selectedAsset.edits, portraitBeautyQuickEdits[mode]), [label]);
+    setStatus(`${label}已应用，可继续调整人像参数`);
   };
 
   const saveCustomPreset = () => {
@@ -4417,12 +4434,22 @@ export function App() {
             </AccordionSection>
 
             <AccordionSection
-              title="人像增强"
-              subtitle="磨皮、润色、美齿和衣物纹理"
+              title="人像美化"
+              subtitle="瘦脸、瘦身、大眼、去皱与肤色"
               isOpen={openGroups.portrait}
               onToggle={() => toggleGroup("portrait")}
               testId="accordion-portrait-trigger"
             >
+              <div className="portrait-quick-actions">
+                <button type="button" data-testid="portrait-even-skin-button" onClick={() => applyPortraitQuickEdit("evenSkin")} disabled={!selectedAssetPreviewEditable}>
+                  <Palette size={16} />
+                  统一肤色
+                </button>
+                <button type="button" data-testid="portrait-natural-beauty-button" onClick={() => applyPortraitQuickEdit("naturalBeauty")} disabled={!selectedAssetPreviewEditable}>
+                  <Sparkles size={16} />
+                  一键美颜
+                </button>
+              </div>
               <div className="controls">{portraitControls.map((control) => renderEditControl(control))}</div>
             </AccordionSection>
 

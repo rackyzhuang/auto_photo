@@ -870,6 +870,11 @@ fn ai_params_have_known_numeric_field(params: &serde_json::Value) -> bool {
         "noiseReduction",
         "qualityEnhancement",
         "skinProtection",
+        "faceSlimming",
+        "bodySlimming",
+        "eyeEnlargement",
+        "wrinkleReduction",
+        "skinToneUniformity",
         "skinSmoothing",
         "skinTone",
         "teethWhitening",
@@ -945,9 +950,9 @@ fn tune_photo_with_openai(
     画面通透、层次可读和不过度放大噪点只是技术质量底线，不是固定审美目标；只要用户明确要求，就允许冷峻、暗调、低饱和、复古、电影感、高反差、柔雾或其他个性方向。\
     summary 必须复述用户要求中的具体审美特征，并说明参数如何落实；如果 summary 只写泛化的自然、风格或通透，视为不合格。\
     只返回一个 JSON 对象，不要 Markdown，不要代码块。JSON 格式必须是：\
-    {{\"summary\":\"一句中文说明\",\"params\":{{\"exposure\":0,\"temperature\":0,\"tint\":0,\"contrast\":0,\"highlights\":0,\"shadows\":0,\"whites\":0,\"blacks\":0,\"saturation\":0,\"vibrance\":0,\"transparency\":0,\"clarity\":0,\"texture\":0,\"dehaze\":0,\"vignette\":0,\"grain\":0,\"sharpness\":0,\"noiseReduction\":0,\"qualityEnhancement\":0,\"skinProtection\":70}}}}。\
+    {{\"summary\":\"一句中文说明\",\"params\":{{\"exposure\":0,\"temperature\":0,\"tint\":0,\"contrast\":0,\"highlights\":0,\"shadows\":0,\"whites\":0,\"blacks\":0,\"saturation\":0,\"vibrance\":0,\"transparency\":0,\"clarity\":0,\"texture\":0,\"dehaze\":0,\"vignette\":0,\"grain\":0,\"sharpness\":0,\"noiseReduction\":0,\"qualityEnhancement\":0,\"skinProtection\":70,\"faceSlimming\":0,\"bodySlimming\":0,\"eyeEnlargement\":0,\"wrinkleReduction\":0,\"skinToneUniformity\":0}}}}。\
     参数范围：exposure -50 到 50；temperature/tint/contrast/saturation/vibrance/clarity/texture/dehaze/vignette -50 到 50；\
-    highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection 0 到 100。\
+    highlights -60 到 40；shadows -40 到 60；whites/blacks -40 到 40；grain 0 到 50；sharpness 0 到 40；transparency/noiseReduction/qualityEnhancement/skinProtection/faceSlimming/bodySlimming/eyeEnlargement/wrinkleReduction/skinToneUniformity 0 到 100。\
     在不削弱用户审美方向的前提下，如果提高 clarity、texture、dehaze、transparency、sharpness 或 qualityEnhancement，应同步给出适度 noiseReduction，避免噪点、色块和 JPEG 颗粒被放大。\
     可省略不需要修改的字段。不要猜测人物身份。文件名：{}。相机信息：{}。当前参数：{}。",
     mode_label,

@@ -1,0 +1,12 @@
+MediaPipe Tasks Vision runtime and model assets
+
+Source:
+https://github.com/google-ai-edge/mediapipe
+https://github.com/google-ai-edge/mediapipe-samples
+
+Bundled models:
+https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+
+MediaPipe is licensed under the Apache License 2.0.
+https://www.apache.org/licenses/LICENSE-2.0

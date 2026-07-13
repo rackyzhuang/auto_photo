@@ -46,6 +46,11 @@ export interface EditParams {
   noiseReduction: number;
   qualityEnhancement: number;
   skinProtection: number;
+  faceSlimming: number;
+  bodySlimming: number;
+  eyeEnlargement: number;
+  wrinkleReduction: number;
+  skinToneUniformity: number;
   skinSmoothing: number;
   skinTone: number;
   teethWhitening: number;

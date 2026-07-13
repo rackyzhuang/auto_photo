@@ -11,6 +11,7 @@ import {
   Palette,
   RotateCcw,
   RotateCw,
+  ScanFace,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -23,7 +24,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { AiSettingsState, AiTuningResult, AutoAnalysis, EditParams, HslChannel, PhotoAsset } from "../types";
 import type { PlatformCapabilities } from "../platform";
-import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams } from "../services/editParams";
+import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams, portraitBeautyQuickEdits } from "../services/editParams";
 import { analyzeImage, createAutoEdit, formatFileSize, importPhotoFile, renderImageSourceWithEdits } from "../services/imageProcessing";
 import { clearAiSettings, diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, saveAiSettings, tunePhotoWithAi } from "../services/desktopBridge";
 
@@ -31,7 +32,7 @@ interface MobileAppProps {
   capabilities: PlatformCapabilities;
 }
 
-type MobileTool = "ai" | "presets" | "tuning" | "hsl" | "crop" | "enhance";
+type MobileTool = "ai" | "presets" | "tuning" | "beauty" | "hsl" | "crop" | "enhance";
 type MobileAiConnectionState = "idle" | "checking" | "available" | "unavailable";
 type NumericEditParamKey = {
   [Key in keyof EditParams]: EditParams[Key] extends number ? Key : never;
@@ -63,6 +64,7 @@ const mobileTools: Array<{ id: MobileTool; label: string; icon: MobileIcon }> = 
   { id: "ai", label: "AI", icon: Sparkles },
   { id: "presets", label: "预设", icon: Palette },
   { id: "tuning", label: "调色", icon: SlidersHorizontal },
+  { id: "beauty", label: "美化", icon: ScanFace },
   { id: "hsl", label: "HSL", icon: Wand2 },
   { id: "crop", label: "裁切", icon: Crop },
   { id: "enhance", label: "增强", icon: ZoomIn }
@@ -91,14 +93,22 @@ const enhanceControls: MobileEditControl[] = [
   { key: "sharpness", label: "锐化", min: 0, max: 40 },
   { key: "noiseReduction", label: "降噪", min: 0, max: 100 },
   { key: "qualityEnhancement", label: "画质增强", min: 0, max: 100 },
+];
+
+const beautyControls: MobileEditControl[] = [
   { key: "skinProtection", label: "肤色保护", min: 0, max: 100 },
+  { key: "faceSlimming", label: "瘦脸", min: 0, max: 100 },
+  { key: "bodySlimming", label: "瘦身", min: 0, max: 100 },
+  { key: "eyeEnlargement", label: "大眼", min: 0, max: 100 },
+  { key: "wrinkleReduction", label: "面部去皱", min: 0, max: 100 },
+  { key: "skinToneUniformity", label: "统一肤色", min: 0, max: 100 },
   { key: "skinSmoothing", label: "磨皮", min: 0, max: 100 },
   { key: "skinTone", label: "润色", min: -50, max: 50 },
   { key: "teethWhitening", label: "美齿", min: 0, max: 100 },
   { key: "clothingWrinkleReduction", label: "衣物去褶皱", min: 0, max: 100 }
 ];
 
-const aiControls = [...basicControls, ...enhanceControls];
+const aiControls = [...basicControls, ...enhanceControls, ...beautyControls];
 
 const hslChannelLabels: Record<HslChannel, string> = {
   red: "红色",
@@ -152,6 +162,11 @@ const aiSafeLimits: Partial<Record<NumericEditParamKey, { min: number; max: numb
   noiseReduction: { min: 0, max: 64, delta: 36 },
   qualityEnhancement: { min: 0, max: 58, delta: 34 },
   skinProtection: { min: 60, max: 96, delta: 28 },
+  faceSlimming: { min: 0, max: 38, delta: 24 },
+  bodySlimming: { min: 0, max: 34, delta: 22 },
+  eyeEnlargement: { min: 0, max: 30, delta: 20 },
+  wrinkleReduction: { min: 0, max: 52, delta: 32 },
+  skinToneUniformity: { min: 0, max: 68, delta: 42 },
   skinSmoothing: { min: 0, max: 45, delta: 24 },
   skinTone: { min: -18, max: 18, delta: 14 },
   teethWhitening: { min: 0, max: 42, delta: 22 },
@@ -731,6 +746,11 @@ export function MobileApp({ capabilities }: MobileAppProps) {
     applyEditsWithHistory((current) => mergeEditParams(current, presetParams), `已应用预设：${presetName}`, presetId);
   };
 
+  const applyPortraitQuickEdit = (mode: keyof typeof portraitBeautyQuickEdits) => {
+    const label = mode === "evenSkin" ? "一键统一肤色" : "一键美颜";
+    applyEditsWithHistory((current) => mergeEditParams(current, portraitBeautyQuickEdits[mode]), `${label}已应用，可继续调整强度`);
+  };
+
   const applyLocalAutoEdit = async () => {
     if (!asset) return;
     clearAiCandidates();
@@ -1254,6 +1274,24 @@ export function MobileApp({ capabilities }: MobileAppProps) {
             { key: "cropWidth", label: "裁切宽", min: 5, max: 100 },
             { key: "cropHeight", label: "裁切高", min: 5, max: 100 }
           ].map((control) => renderControl(control as MobileEditControl))}
+        </div>
+      );
+    }
+
+    if (activeTool === "beauty") {
+      return (
+        <div className="mobile-control-list">
+          <div className="mobile-beauty-actions">
+            <button type="button" onClick={() => applyPortraitQuickEdit("evenSkin")}>
+              <Palette size={17} />
+              统一肤色
+            </button>
+            <button type="button" onClick={() => applyPortraitQuickEdit("naturalBeauty")}>
+              <Sparkles size={17} />
+              一键美颜
+            </button>
+          </div>
+          {beautyControls.map((control) => renderControl(control))}
         </div>
       );
     }

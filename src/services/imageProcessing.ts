@@ -2,6 +2,7 @@ import exifr from "exifr";
 import type { AutoAnalysis, CameraBrand, EditParams, ExportSettings, PhotoAsset, PhotoMetadata, SourceFormat } from "../types";
 import { createDefaultEditParams, mergeEditParams } from "./editParams";
 import { applyCanvasGeometry } from "./geometry";
+import { analyzePortrait, applyPortraitGeometry, needsPortraitAnalysis } from "./portraitBeautify";
 import { findEmbeddedJpegCandidates, RAW_JPEG_SCAN_LIMIT } from "./rawEmbeddedJpeg";
 import { applyEditPipeline } from "./renderPipeline";
 import { drawWatermark } from "./watermark";
@@ -450,7 +451,25 @@ export const renderImageSourceWithEdits = async (
 
   throwIfAborted(options.signal);
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  applyEditPipeline(imageData, edits);
+  const sourceCacheKey = sourceUrl.startsWith("data:")
+    ? `${sourceUrl.length}:${sourceUrl.slice(-72)}`
+    : sourceUrl;
+  const portraitCacheKey = [
+    sourceCacheKey,
+    options.orientation ?? 1,
+    edits.rotation,
+    edits.cropAspect,
+    edits.cropX,
+    edits.cropY,
+    edits.cropWidth,
+    edits.cropHeight
+  ].join("|");
+  const portraitAnalysis = needsPortraitAnalysis(edits)
+    ? await analyzePortrait(canvas, edits, portraitCacheKey)
+    : undefined;
+  throwIfAborted(options.signal);
+  if (portraitAnalysis) applyPortraitGeometry(imageData, edits, portraitAnalysis);
+  applyEditPipeline(imageData, edits, portraitAnalysis);
 
   throwIfAborted(options.signal);
   ctx.putImageData(imageData, 0, 0);
