@@ -235,6 +235,7 @@ export interface AiConnectionDiagnostic {
   model: string;
   modelAvailable: boolean;
   modelCount: number;
+  availableModels: string[];
   message: string;
 }
 

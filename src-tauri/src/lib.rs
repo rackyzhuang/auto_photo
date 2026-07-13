@@ -156,6 +156,7 @@ struct AiConnectionDiagnostic {
     model: String,
     model_available: bool,
     model_count: usize,
+    available_models: Vec<String>,
     message: String,
 }
 
@@ -497,6 +498,7 @@ fn build_ai_connection_diagnostic(
             model: settings.model,
             model_available: false,
             model_count: 0,
+            available_models: Vec::new(),
             message: "AI key 尚未保存；请先保存 API key 后再诊断连接。".to_string(),
         };
     }
@@ -524,6 +526,7 @@ fn build_ai_connection_diagnostic(
                 model: settings.model,
                 model_available,
                 model_count,
+                available_models: model_list.models,
                 message,
             }
         }
@@ -533,6 +536,7 @@ fn build_ai_connection_diagnostic(
             model: settings.model,
             model_available: false,
             model_count: 0,
+            available_models: Vec::new(),
             message: format!(
                 "AI 连接诊断未通过：{}。请检查 API key、Base URL、/v1 路径、模型权限或网络。",
                 error.chars().take(120).collect::<String>()
@@ -2395,6 +2399,7 @@ mod tests {
         assert!(passed.has_api_key);
         assert!(passed.model_available);
         assert_eq!(passed.model_count, 2);
+        assert_eq!(passed.available_models, ["selected-model", "other-model"]);
         assert!(!passed.message.contains("private.example.test"));
 
         let missing_model = build_ai_connection_diagnostic(
@@ -2412,6 +2417,7 @@ mod tests {
         assert!(missing_model.has_api_key);
         assert!(!missing_model.model_available);
         assert_eq!(missing_model.model_count, 1);
+        assert_eq!(missing_model.available_models, ["other-model"]);
         assert!(missing_model.message.contains("当前模型不在模型列表中"));
         assert!(!missing_model.message.contains("private.example.test"));
 
@@ -2427,6 +2433,7 @@ mod tests {
         assert_eq!(no_key.status, "failed");
         assert!(!no_key.has_api_key);
         assert_eq!(no_key.model_count, 0);
+        assert!(no_key.available_models.is_empty());
         assert!(!no_key.message.contains("private.example.test"));
     }
 

@@ -395,6 +395,7 @@ export const autophotoDevAiBridge = (root = process.cwd()) => ({
               model: config.model,
               modelAvailable,
               modelCount: modelList.models.length,
+              availableModels: modelList.models,
               message: modelList.models.length === 0
                 ? "开发调试桥连接正常，模型列表为空，已保留当前手动模型用于调色请求"
                 : modelAvailable
@@ -408,6 +409,7 @@ export const autophotoDevAiBridge = (root = process.cwd()) => ({
               model: config.model,
               modelAvailable: false,
               modelCount: 0,
+              availableModels: [],
               message: `开发调试桥连接失败：${error instanceof Error ? error.message : String(error)}`
             });
           }

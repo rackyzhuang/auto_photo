@@ -2594,6 +2594,7 @@ export function App() {
         model: aiSettings.model,
         modelAvailable: false,
         modelCount: 0,
+        availableModels: [],
         message: `AI 连接诊断失败：${explanation.message}`
       };
       setAiConnectionDiagnostic(diagnostic);

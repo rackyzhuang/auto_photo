@@ -531,6 +531,7 @@ button:disabled {
 }
 
 .mobile-ai-settings input,
+.mobile-ai-settings select,
 .mobile-ai-prompt textarea {
   width: 100%;
   min-width: 0;
@@ -540,9 +541,14 @@ button:disabled {
   background: #11161d;
 }
 
-.mobile-ai-settings input {
+.mobile-ai-settings input,
+.mobile-ai-settings select {
   height: 38px;
   padding: 0 10px;
+}
+
+.mobile-ai-settings select {
+  appearance: auto;
 }
 
 .mobile-ai-prompt textarea {
@@ -555,7 +561,17 @@ button:disabled {
 .mobile-ai-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.mobile-ai-config-status {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  color: #b8c5d2;
+  font-size: 12px;
 }
 
 .mobile-ai-actions .mobile-ai-clear {

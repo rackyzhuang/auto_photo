@@ -32,6 +32,7 @@ interface MobileAppProps {
 }
 
 type MobileTool = "ai" | "presets" | "tuning" | "hsl" | "crop" | "enhance";
+type MobileAiConnectionState = "idle" | "checking" | "available" | "unavailable";
 type NumericEditParamKey = {
   [Key in keyof EditParams]: EditParams[Key] extends number ? Key : never;
 }[keyof EditParams] & Exclude<keyof EditParams, "schemaVersion">;
@@ -56,6 +57,7 @@ interface MobileAiCandidate {
 
 const MOBILE_PREVIEW_MAX_EDGE = 1500;
 const MOBILE_PREVIEW_QUALITY = 0.9;
+const MOBILE_AI_AUTOSAVE_DELAY = 700;
 
 const mobileTools: Array<{ id: MobileTool; label: string; icon: MobileIcon }> = [
   { id: "ai", label: "AI", icon: Sparkles },
@@ -405,6 +407,9 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const aiBaselineRef = useRef<EditParams>();
   const editsRef = useRef<EditParams>(createDefaultEditParams());
   const historyGestureRef = useRef<{ snapshot: EditParams; pushed: boolean }>();
+  const aiSettingsRequestRef = useRef(0);
+  const aiAutoSaveTimerRef = useRef<number>();
+  const lastAttemptedAiConfigRef = useRef("");
   const [asset, setAsset] = useState<PhotoAsset>();
   const [edits, setEdits] = useState<EditParams>(() => createDefaultEditParams());
   const [undoStack, setUndoStack] = useState<EditParams[]>([]);
@@ -427,7 +432,8 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const [aiInstruction, setAiInstruction] = useState("");
   const [isSavingAiSettings, setIsSavingAiSettings] = useState(false);
   const [isClearingAiSettings, setIsClearingAiSettings] = useState(false);
-  const [isDiagnosingAi, setIsDiagnosingAi] = useState(false);
+  const [isAiSettingsHydrated, setIsAiSettingsHydrated] = useState(false);
+  const [aiConnectionState, setAiConnectionState] = useState<MobileAiConnectionState>("idle");
   const [isAiRunning, setIsAiRunning] = useState(false);
   const [aiCandidates, setAiCandidates] = useState<MobileAiCandidate[]>([]);
   const [selectedAiCandidateId, setSelectedAiCandidateId] = useState<string>();
@@ -440,6 +446,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   );
   const displayPreviewUrl = aiStrengthPreviewUrl ?? selectedAiCandidate?.previewUrl ?? previewUrl;
   const canComparePreview = Boolean(asset && displayPreviewUrl && originalCompareUrl);
+  const isAiConfigurationAvailable = aiConnectionState === "available";
 
   useEffect(() => {
     assetRef.current = asset;
@@ -450,7 +457,11 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   }, [edits]);
 
   useEffect(() => {
-    return () => releaseAsset(assetRef.current);
+    return () => {
+      releaseAsset(assetRef.current);
+      if (aiAutoSaveTimerRef.current) window.clearTimeout(aiAutoSaveTimerRef.current);
+      aiSettingsRequestRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -460,8 +471,10 @@ export function MobileApp({ capabilities }: MobileAppProps) {
         setAiSettings(settings);
         setAiBaseUrlDraft(settings.baseUrl);
         setAiModelDraft(settings.model);
+        setIsAiSettingsHydrated(true);
       })
       .catch(() => {
+        setIsAiSettingsHydrated(true);
         setStatus("移动端 AI 设置读取失败，可稍后重试");
       });
   }, []);
@@ -762,48 +775,104 @@ export function MobileApp({ capabilities }: MobileAppProps) {
     }
   };
 
-  const saveMobileAiSettings = async () => {
+  const persistAndDiagnoseMobileAi = async (apiKeyDraft = aiApiKeyDraft, baseUrlDraft = aiBaseUrlDraft) => {
     if (!isAiRuntimeAvailable()) {
       setStatus("AI 设置需要 Tauri 真机环境或本地开发调试桥");
       return;
     }
+
+    const apiKey = apiKeyDraft.trim();
+    const baseUrl = baseUrlDraft.trim();
+    if ((!apiKey && !aiSettings.hasApiKey) || !baseUrl) return;
+
+    const configSignature = `${apiKey || "<saved>"}\n${baseUrl}`;
+    lastAttemptedAiConfigRef.current = configSignature;
+    const requestId = ++aiSettingsRequestRef.current;
     setIsSavingAiSettings(true);
+    setAiConnectionState("checking");
+    setStatus("正在保存并自动检测 AI 配置");
     try {
-      const settings = await saveAiSettings({
-        apiKey: aiApiKeyDraft.trim() || undefined,
-        baseUrl: aiBaseUrlDraft,
+      let settings = await saveAiSettings({
+        apiKey: apiKey || undefined,
+        baseUrl,
         model: aiModelDraft
       });
-      setAiSettings(settings);
+      if (requestId !== aiSettingsRequestRef.current) return;
+
       setAiBaseUrlDraft(settings.baseUrl);
       setAiModelDraft(settings.model);
+      const diagnostic = await diagnoseAiConnection();
+      if (requestId !== aiSettingsRequestRef.current) return;
+
+      const diagnosedModels = diagnostic.availableModels.length > 0 ? diagnostic.availableModels : diagnostic.status === "passed" ? [diagnostic.model] : [];
+      const connectionAvailable = diagnostic.hasApiKey && (diagnostic.status === "passed" || diagnosedModels.length > 0);
+      if (!connectionAvailable) {
+        setAiSettings({ ...settings, availableModels: diagnosedModels });
+        setAiConnectionState("unavailable");
+        setStatus(diagnostic.message);
+        return;
+      }
+
+      let selectedModel = diagnostic.model;
+      if (diagnosedModels.length > 0 && !diagnosedModels.includes(selectedModel)) {
+        selectedModel = diagnosedModels[0];
+        settings = await saveAiSettings({ baseUrl: settings.baseUrl, model: selectedModel });
+        if (requestId !== aiSettingsRequestRef.current) return;
+      }
+
+      setAiSettings({ ...settings, model: selectedModel, availableModels: diagnosedModels.length > 0 ? diagnosedModels : [selectedModel] });
+      setAiModelDraft(selectedModel);
       setAiApiKeyDraft("");
-      setStatus(`AI 设置已保存，当前模型：${settings.model}`);
+      setAiConnectionState("available");
+      setStatus(selectedModel === diagnostic.model ? diagnostic.message : `AI 配置可用，已自动选择模型：${selectedModel}`);
     } catch (error) {
+      if (requestId !== aiSettingsRequestRef.current) return;
+      setAiConnectionState("unavailable");
       setStatus(error instanceof Error ? error.message : "AI 设置保存失败");
     } finally {
-      setIsSavingAiSettings(false);
+      if (requestId === aiSettingsRequestRef.current) setIsSavingAiSettings(false);
     }
   };
 
-  const diagnoseMobileAi = async () => {
-    if (!isAiRuntimeAvailable()) {
-      setStatus("AI 诊断需要 Tauri 真机环境或本地开发调试桥");
-      return;
-    }
-    setIsDiagnosingAi(true);
+  const triggerMobileAiConfiguration = () => {
+    if (aiAutoSaveTimerRef.current) window.clearTimeout(aiAutoSaveTimerRef.current);
+    const configSignature = `${aiApiKeyDraft.trim() || "<saved>"}\n${aiBaseUrlDraft.trim()}`;
+    if (aiConnectionState === "checking" && lastAttemptedAiConfigRef.current === configSignature) return;
+    void persistAndDiagnoseMobileAi();
+  };
+
+  const updateMobileAiApiKeyDraft = (value: string) => {
+    aiSettingsRequestRef.current += 1;
+    setIsSavingAiSettings(false);
+    setAiConnectionState("idle");
+    setAiApiKeyDraft(value);
+  };
+
+  const updateMobileAiBaseUrlDraft = (value: string) => {
+    aiSettingsRequestRef.current += 1;
+    setIsSavingAiSettings(false);
+    setAiConnectionState("idle");
+    setAiBaseUrlDraft(value);
+  };
+
+  const updateMobileAiModel = async (model: string) => {
+    if (!model || model === aiSettings.model || !isAiRuntimeAvailable()) return;
+    const previousModel = aiSettings.model;
+    const requestId = ++aiSettingsRequestRef.current;
+    setAiModelDraft(model);
+    setIsSavingAiSettings(true);
     try {
-      const result = await diagnoseAiConnection();
-      setStatus(result.message);
-      setAiSettings((current) => ({
-        ...current,
-        hasApiKey: result.hasApiKey,
-        model: result.model
-      }));
+      const settings = await saveAiSettings({ baseUrl: aiSettings.baseUrl, model });
+      if (requestId !== aiSettingsRequestRef.current) return;
+      setAiSettings({ ...settings, availableModels: aiSettings.availableModels });
+      setAiModelDraft(settings.model);
+      setStatus(`已切换 AI 模型：${settings.model}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "AI 连接诊断失败");
+      if (requestId !== aiSettingsRequestRef.current) return;
+      setAiModelDraft(previousModel);
+      setStatus(error instanceof Error ? error.message : "AI 模型保存失败");
     } finally {
-      setIsDiagnosingAi(false);
+      if (requestId === aiSettingsRequestRef.current) setIsSavingAiSettings(false);
     }
   };
 
@@ -812,6 +881,9 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       setStatus("AI 设置需要 Tauri 真机环境或本地开发调试桥");
       return;
     }
+    aiSettingsRequestRef.current += 1;
+    lastAttemptedAiConfigRef.current = "";
+    if (aiAutoSaveTimerRef.current) window.clearTimeout(aiAutoSaveTimerRef.current);
     setIsClearingAiSettings(true);
     try {
       const settings = await clearAiSettings();
@@ -819,6 +891,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       setAiApiKeyDraft("");
       setAiBaseUrlDraft(settings.baseUrl);
       setAiModelDraft(settings.model);
+      setAiConnectionState("idle");
       setStatus("AI 配置文件已清空");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "AI 配置清空失败");
@@ -826,6 +899,24 @@ export function MobileApp({ capabilities }: MobileAppProps) {
       setIsClearingAiSettings(false);
     }
   };
+
+  useEffect(() => {
+    if (!isAiSettingsHydrated || !isAiRuntimeAvailable() || isClearingAiSettings || isAiConfigurationAvailable) return;
+    const apiKey = aiApiKeyDraft.trim();
+    const baseUrl = aiBaseUrlDraft.trim();
+    if ((!apiKey && !aiSettings.hasApiKey) || !baseUrl) return;
+
+    const configSignature = `${apiKey || "<saved>"}\n${baseUrl}`;
+    if (lastAttemptedAiConfigRef.current === configSignature) return;
+    if (aiAutoSaveTimerRef.current) window.clearTimeout(aiAutoSaveTimerRef.current);
+    aiAutoSaveTimerRef.current = window.setTimeout(() => {
+      void persistAndDiagnoseMobileAi(apiKey, baseUrl);
+    }, MOBILE_AI_AUTOSAVE_DELAY);
+
+    return () => {
+      if (aiAutoSaveTimerRef.current) window.clearTimeout(aiAutoSaveTimerRef.current);
+    };
+  }, [aiApiKeyDraft, aiBaseUrlDraft, aiConnectionState, aiSettings.hasApiKey, isAiSettingsHydrated, isClearingAiSettings]);
 
   const runMobileAiTuning = async () => {
     if (!asset) {
@@ -949,32 +1040,49 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const renderAiPanel = () => (
     <div className="mobile-ai-stack">
       <div className="mobile-ai-settings">
-        <label>
-          <span>API key</span>
-          <input type="password" value={aiApiKeyDraft} onChange={(event) => setAiApiKeyDraft(event.target.value)} placeholder={aiSettings.hasApiKey ? "已保存，留空不修改" : "输入后保存到应用配置文件"} />
-        </label>
-        <label>
-          <span>Base URL</span>
-          <input value={aiBaseUrlDraft} onChange={(event) => setAiBaseUrlDraft(event.target.value)} placeholder="https://api.openai.com/v1" />
-        </label>
-        <label>
-          <span>Model</span>
-          <input list="mobile-ai-models" value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)} />
-          <datalist id="mobile-ai-models">
-            {aiSettings.availableModels.map((model) => (
-              <option key={model} value={model} />
-            ))}
-          </datalist>
-        </label>
+        {isAiConfigurationAvailable ? (
+          <label>
+            <span>Model</span>
+            <select value={aiModelDraft} onChange={(event) => void updateMobileAiModel(event.target.value)} disabled={isSavingAiSettings || isClearingAiSettings}>
+              {aiSettings.availableModels.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <>
+            <label>
+              <span>API key</span>
+              <input
+                type="password"
+                value={aiApiKeyDraft}
+                onChange={(event) => updateMobileAiApiKeyDraft(event.target.value)}
+                onBlur={triggerMobileAiConfiguration}
+                placeholder={aiSettings.hasApiKey ? "已保存，重新填写可替换" : "请输入 API key"}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <span>Base URL</span>
+              <input
+                value={aiBaseUrlDraft}
+                onChange={(event) => updateMobileAiBaseUrlDraft(event.target.value)}
+                onBlur={triggerMobileAiConfiguration}
+                placeholder="https://api.openai.com/v1"
+                inputMode="url"
+              />
+            </label>
+          </>
+        )}
         <div className="mobile-ai-actions">
-          <button type="button" onClick={saveMobileAiSettings} disabled={isSavingAiSettings}>
-            {isSavingAiSettings ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
-            保存 AI
-          </button>
-          <button type="button" onClick={diagnoseMobileAi} disabled={isDiagnosingAi}>
-            {isDiagnosingAi ? <Loader2 className="spin" size={18} /> : <Wand2 size={18} />}
-            诊断
-          </button>
+          {isSavingAiSettings && (
+            <span className="mobile-ai-config-status">
+              <Loader2 className="spin" size={16} />
+              {isAiConfigurationAvailable ? "正在保存模型" : "正在保存并检测"}
+            </span>
+          )}
           <button type="button" className="mobile-ai-clear" onClick={clearMobileAiSettings} disabled={isClearingAiSettings || isSavingAiSettings}>
             {isClearingAiSettings ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}
             清空配置
