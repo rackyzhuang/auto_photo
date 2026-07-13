@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use exif::{In, Reader, Tag, Value};
+#[cfg(not(target_os = "android"))]
 use keyring::Entry;
 use rusqlite::{params, Connection};
 use std::io::BufReader;
@@ -201,6 +202,16 @@ fn ai_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join("ai-settings.json"))
 }
 
+#[cfg(target_os = "android")]
+fn ai_api_key_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
+    fs::create_dir_all(&app_data_dir).map_err(|error| format!("无法创建应用数据目录：{error}"))?;
+    Ok(app_data_dir.join("ai-api-key"))
+}
+
 fn normalize_ai_url(base_url: &str) -> String {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -296,19 +307,37 @@ fn load_stored_ai_settings(app: &tauri::AppHandle) -> AiStoredSettings {
     load_stored_ai_settings_from_path(&path)
 }
 
+fn save_stored_ai_settings(
+    app: &tauri::AppHandle,
+    settings: &AiStoredSettings,
+) -> Result<(), String> {
+    let settings_json = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("无法序列化 AI 设置：{error}"))?;
+    fs::write(ai_settings_path(app)?, settings_json)
+        .map_err(|error| format!("无法保存 AI 设置：{error}"))
+}
+
+#[cfg(not(target_os = "android"))]
 fn keyring_entry() -> Result<Entry, String> {
     Entry::new(AI_KEYRING_SERVICE, AI_KEYRING_USER)
         .map_err(|error| format!("系统钥匙串不可用，无法保存或读取 API key：{error}"))
 }
 
-fn has_ai_api_key() -> bool {
-    keyring_entry()
-        .and_then(|entry| entry.get_password().map_err(|_| "missing".to_string()))
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+#[cfg(not(target_os = "android"))]
+fn save_ai_api_key(_app: &tauri::AppHandle, api_key: &str) -> Result<(), String> {
+    keyring_entry()?
+        .set_password(api_key)
+        .map_err(|error| format!("API key 写入系统钥匙串失败：{error}"))
 }
 
-fn load_ai_api_key() -> Result<String, String> {
+#[cfg(target_os = "android")]
+fn save_ai_api_key(app: &tauri::AppHandle, api_key: &str) -> Result<(), String> {
+    fs::write(ai_api_key_path(app)?, api_key)
+        .map_err(|error| format!("API key 写入安卓应用私有存储失败：{error}"))
+}
+
+#[cfg(not(target_os = "android"))]
+fn load_ai_api_key(_app: &tauri::AppHandle) -> Result<String, String> {
     let api_key = keyring_entry().and_then(|entry| {
         entry
             .get_password()
@@ -321,9 +350,24 @@ fn load_ai_api_key() -> Result<String, String> {
     Ok(api_key)
 }
 
+#[cfg(target_os = "android")]
+fn load_ai_api_key(app: &tauri::AppHandle) -> Result<String, String> {
+    let api_key = fs::read_to_string(ai_api_key_path(app)?)
+        .map_err(|_| "请先在 AI 设置中保存 API key".to_string())?;
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("请先在 AI 设置中保存 API key".to_string());
+    }
+    Ok(api_key)
+}
+
+fn has_ai_api_key(app: &tauri::AppHandle) -> bool {
+    load_ai_api_key(app).is_ok()
+}
+
 fn load_ai_runtime_config(app: &tauri::AppHandle) -> Result<AiRuntimeConfig, String> {
     let settings = load_stored_ai_settings(app);
-    let api_key = load_ai_api_key()?;
+    let api_key = load_ai_api_key(app)?;
 
     Ok(AiRuntimeConfig {
         api_key,
@@ -502,10 +546,10 @@ fn build_ai_connection_diagnostic(
 #[tauri::command]
 fn get_ai_settings(app: tauri::AppHandle) -> Result<AiSettingsState, String> {
     let settings = load_stored_ai_settings(&app);
-    let has_api_key = has_ai_api_key();
+    let has_api_key = has_ai_api_key(&app);
     let available_models = if has_api_key {
         let model_list =
-            load_ai_api_key().and_then(|api_key| fetch_ai_models(&settings.base_url, &api_key));
+            load_ai_api_key(&app).and_then(|api_key| fetch_ai_models(&settings.base_url, &api_key));
         available_ai_models_with_saved_fallback(&settings, model_list)
     } else {
         Vec::new()
@@ -525,42 +569,46 @@ fn save_ai_settings(
     if let Some(api_key) = settings.api_key {
         let api_key = api_key.trim();
         if !api_key.is_empty() {
-            keyring_entry()?
-                .set_password(api_key)
-                .map_err(|error| format!("API key 写入系统钥匙串失败：{error}"))?;
+            save_ai_api_key(&app, api_key)?;
         }
     }
 
     let base_url = normalize_ai_url(&settings.base_url);
-    let api_key = load_ai_api_key()?;
-    let model_list = fetch_ai_models(&base_url, &api_key)?;
-    let base_url = model_list.base_url;
-    let available_models = model_list.models;
     let requested_model = normalize_ai_model(settings.model.as_deref());
-    let selected_model = if available_models
-        .iter()
-        .any(|model| model == &requested_model)
-    {
-        requested_model
-    } else if available_models
-        .iter()
-        .any(|model| model == DEFAULT_AI_MODEL)
-    {
-        DEFAULT_AI_MODEL.to_string()
-    } else {
-        available_models
-            .first()
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_AI_MODEL.to_string())
-    };
-    let normalized = AiStoredSettings {
-        model: selected_model,
+    let mut normalized = AiStoredSettings {
+        model: requested_model,
         base_url,
     };
-    let settings_json = serde_json::to_string_pretty(&normalized)
-        .map_err(|error| format!("无法序列化 AI 设置：{error}"))?;
-    fs::write(ai_settings_path(&app)?, settings_json)
-        .map_err(|error| format!("无法保存 AI 设置：{error}"))?;
+    save_stored_ai_settings(&app, &normalized)?;
+
+    let api_key = load_ai_api_key(&app)?;
+    let available_models = match fetch_ai_models(&normalized.base_url, &api_key) {
+        Ok(model_list) => {
+            normalized.base_url = model_list.base_url;
+            if !model_list
+                .models
+                .iter()
+                .any(|model| model == &normalized.model)
+            {
+                normalized.model = if model_list
+                    .models
+                    .iter()
+                    .any(|model| model == DEFAULT_AI_MODEL)
+                {
+                    DEFAULT_AI_MODEL.to_string()
+                } else {
+                    model_list
+                        .models
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| normalized.model.clone())
+                };
+            }
+            save_stored_ai_settings(&app, &normalized)?;
+            model_list.models
+        }
+        Err(_) => vec![normalized.model.clone()],
+    };
 
     Ok(build_ai_settings_state(normalized, true, available_models))
 }
@@ -568,9 +616,9 @@ fn save_ai_settings(
 #[tauri::command]
 fn diagnose_ai_connection(app: tauri::AppHandle) -> Result<AiConnectionDiagnostic, String> {
     let settings = load_stored_ai_settings(&app);
-    let has_api_key = has_ai_api_key();
+    let has_api_key = has_ai_api_key(&app);
     let model_list = if has_api_key {
-        load_ai_api_key().and_then(|api_key| fetch_ai_models(&settings.base_url, &api_key))
+        load_ai_api_key(&app).and_then(|api_key| fetch_ai_models(&settings.base_url, &api_key))
     } else {
         Err("AI key 尚未保存".to_string())
     };

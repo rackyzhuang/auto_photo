@@ -151,6 +151,9 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Generate Android launcher icons from logo
+        run: npm run tauri -- icon logo.png
+
       - name: Initialize Android project
         shell: bash
         run: |
