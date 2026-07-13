@@ -33,10 +33,6 @@ jobs:
             os: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles app,dmg
-          - name: macOS Intel
-            os: macos-latest
-            target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles app,dmg
 
     steps:
       - name: Checkout
@@ -129,7 +125,12 @@ jobs:
       - name: Install Android SDK packages
         shell: bash
         run: |
+          # sdkmanager exits after accepting every license, which closes the pipe
+          # while `yes` is still writing. Ignore that expected SIGPIPE without
+          # hiding a real sdkmanager failure.
+          set +o pipefail
           yes | sdkmanager --licenses
+          set -o pipefail
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
@@ -187,10 +188,6 @@ jobs:
     name: Build iOS
     runs-on: macos-latest
     needs: build-release
-    env:
-      IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
-      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
-      IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
 
     steps:
       - name: Checkout
@@ -240,8 +237,27 @@ jobs:
       - name: Build iOS simulator app
         run: npm run mobile:ios:build:simulator
 
+      - name: Detect iOS signing configuration
+        id: ios-signing
+        shell: bash
+        env:
+          AUTOPHOTO_IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          AUTOPHOTO_IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          AUTOPHOTO_IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+        run: |
+          if [ -n "$AUTOPHOTO_IOS_CERTIFICATE" ] && [ -n "$AUTOPHOTO_IOS_CERTIFICATE_PASSWORD" ] && [ -n "$AUTOPHOTO_IOS_MOBILE_PROVISION" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Apple signing secrets are incomplete; the simulator artifact will still be published."
+          fi
+
       - name: Build signed iOS IPA
-        if: env.IOS_CERTIFICATE != '' && env.IOS_CERTIFICATE_PASSWORD != '' && env.IOS_MOBILE_PROVISION != ''
+        if: steps.ios-signing.outputs.enabled == 'true'
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
         run: npm run mobile:ios:build:release
 
       - name: Collect iOS artifacts
