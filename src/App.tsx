@@ -75,6 +75,7 @@ import { desktopPhotoPayloadToFile } from "./services/desktopImportPayload";
 import { disposePreviewWorker, renderPreviewWithWorkerFallback } from "./services/previewWorkerClient";
 import { loadStoredState, saveStoredState } from "./services/storage";
 import {
+  clearAiSettings,
   clearExportJobs,
   chooseExportDirectory,
   choosePhotoFilePaths,
@@ -875,11 +876,12 @@ export function App() {
   const [aiApiKeyDraft, setAiApiKeyDraft] = useState("");
   const [aiModelDraft, setAiModelDraft] = useState("gpt-5.5");
   const [aiBaseUrlDraft, setAiBaseUrlDraft] = useState("https://api.openai.com/v1");
-  const [isAiConfigEditing, setIsAiConfigEditing] = useState(false);
   const [aiInstruction, setAiInstruction] = useState("");
   const [isSavingAiSettings, setIsSavingAiSettings] = useState(false);
   const [isDiagnosingAi, setIsDiagnosingAi] = useState(false);
   const [aiConnectionDiagnostic, setAiConnectionDiagnostic] = useState<AiConnectionDiagnostic>();
+  const [isAiSettingsHydrated, setIsAiSettingsHydrated] = useState(false);
+  const [aiPanelVisitToken, setAiPanelVisitToken] = useState(0);
   const [isAiTuning, setIsAiTuning] = useState(false);
   const [aiPendingSuggestions, setAiPendingSuggestions] = useState<AiPendingSuggestion[]>([]);
   const [selectedAiSuggestionId, setSelectedAiSuggestionId] = useState<string>();
@@ -969,6 +971,12 @@ export function App() {
     setOpenGroups((current) => ({ ...current, [group]: !current[group] }));
   };
 
+  const toggleAiGroup = () => {
+    const isOpening = !openGroups.ai;
+    toggleGroup("ai");
+    if (isOpening) setAiPanelVisitToken((current) => current + 1);
+  };
+
   const clearAiSuggestions = () => {
     setAiPendingSuggestions([]);
     setSelectedAiSuggestionId(undefined);
@@ -1004,15 +1012,17 @@ export function App() {
         setAiSettings(settings);
         setAiModelDraft(settings.model);
         setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(settings.baseUrl));
-        setIsAiConfigEditing(!settings.hasApiKey || settings.availableModels.length === 0);
+        setAiConnectionDiagnostic(undefined);
+        setIsAiSettingsHydrated(true);
         setAiPanelMessage(
-          settings.hasApiKey && settings.availableModels.length > 0
-            ? `AI 设置已就绪，可用模型 ${settings.availableModels.length} 个`
+          settings.hasApiKey
+            ? "AI 配置已读取，打开 AI 面板后将检测可用性"
             : "请先保存 API key 和 Base URL"
         );
       })
       .catch((error) => {
         if (cancelled) return;
+        setIsAiSettingsHydrated(true);
         setAiPanelMessage(error instanceof Error ? error.message : "AI 设置读取失败");
       });
 
@@ -2530,6 +2540,74 @@ export function App() {
       .join("\n");
   };
 
+  const finishCurrentAiDiagnostic = async (initialSettings: AiSettingsState) => {
+    const diagnostic = await diagnoseAiConnection();
+    const diagnosedModels = diagnostic.availableModels.length > 0
+      ? diagnostic.availableModels
+      : diagnostic.status === "passed"
+        ? [diagnostic.model]
+        : [];
+    const connectionAvailable = diagnostic.hasApiKey && (diagnostic.status === "passed" || diagnosedModels.length > 0);
+    if (!connectionAvailable) {
+      const failedDiagnostic = { ...diagnostic, availableModels: diagnosedModels };
+      setAiSettings({ ...initialSettings, availableModels: diagnosedModels });
+      setAiConnectionDiagnostic(failedDiagnostic);
+      setAiPanelMessage(`AI 配置检测未通过：${diagnostic.message}`);
+      setStatus("AI 配置检测未通过，请检查 Key、URL 和网络");
+      return;
+    }
+
+    let settings = initialSettings;
+    let selectedModel = diagnostic.model;
+    if (diagnosedModels.length > 0 && !diagnosedModels.includes(selectedModel)) {
+      selectedModel = diagnosedModels[0];
+      settings = await saveAiSettings({ baseUrl: initialSettings.baseUrl, model: selectedModel });
+    }
+    const availableModels = diagnosedModels.length > 0 ? diagnosedModels : [selectedModel];
+    const passedDiagnostic: AiConnectionDiagnostic = {
+      status: "passed",
+      hasApiKey: true,
+      model: selectedModel,
+      modelAvailable: true,
+      modelCount: availableModels.length,
+      availableModels,
+      message: "AI 配置检测完成，连接正常，可以使用"
+    };
+    setAiSettings({ ...settings, model: selectedModel, availableModels });
+    setAiModelDraft(selectedModel);
+    setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(settings.baseUrl));
+    setAiApiKeyDraft("");
+    setAiConnectionDiagnostic(passedDiagnostic);
+    setAiPanelMessage(passedDiagnostic.message);
+    setStatus(passedDiagnostic.message);
+  };
+
+  const diagnoseSavedAiSettings = async (settings = aiSettings) => {
+    if (!isAiRuntimeAvailable() || !settings.hasApiKey || isDiagnosingAi) return;
+    setIsDiagnosingAi(true);
+    setAiConnectionDiagnostic(undefined);
+    setAiPanelMessage("正在检测 AI 配置，请稍候");
+    try {
+      await finishCurrentAiDiagnostic(settings);
+    } catch (error) {
+      const explanation = explainAiFailureReason(error instanceof Error ? error.message : "AI 配置检测失败");
+      const diagnostic: AiConnectionDiagnostic = {
+        status: "failed",
+        hasApiKey: settings.hasApiKey,
+        model: settings.model,
+        modelAvailable: false,
+        modelCount: 0,
+        availableModels: [],
+        message: `AI 配置检测失败：${explanation.message}`
+      };
+      setAiConnectionDiagnostic(diagnostic);
+      setAiPanelMessage(diagnostic.message);
+      setStatus(diagnostic.message);
+    } finally {
+      setIsDiagnosingAi(false);
+    }
+  };
+
   const saveCurrentAiSettings = async () => {
     if (!isAiRuntimeAvailable()) {
       setAiPanelMessage("AI 设置需要桌面端或本地开发调试桥");
@@ -2539,8 +2617,14 @@ export function App() {
       setAiPanelMessage("请填写 API key，保存后会自动获取模型列表");
       return;
     }
+    if (!sanitizeAiBaseUrlForDisplay(aiBaseUrlDraft)) {
+      setAiPanelMessage("请填写 Base URL");
+      return;
+    }
     setIsSavingAiSettings(true);
-    setAiPanelMessage("正在保存 AI 设置并获取模型列表");
+    setIsDiagnosingAi(true);
+    setAiConnectionDiagnostic(undefined);
+    setAiPanelMessage("设置已确认，正在检测 AI 配置，请稍候");
     try {
       const settings = await saveAiSettings({
         apiKey: aiApiKeyDraft.trim() ? aiApiKeyDraft : undefined,
@@ -2550,21 +2634,14 @@ export function App() {
       setAiSettings(settings);
       setAiModelDraft(settings.model);
       setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(settings.baseUrl));
-      setAiApiKeyDraft("");
-      setAiConnectionDiagnostic(undefined);
-      setIsAiConfigEditing(!(settings.hasApiKey && settings.availableModels.length > 0));
-      setAiPanelMessage(
-        settings.hasApiKey && settings.availableModels.length > 0
-          ? `AI 设置已保存，已获取 ${settings.availableModels.length} 个模型`
-          : "AI 设置已保存，请继续填写 API key"
-      );
-      setStatus("AI 设置已保存");
+      await finishCurrentAiDiagnostic(settings);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "AI 设置保存失败";
+      const message = error instanceof Error ? `AI 配置检测失败：${error.message}` : "AI 配置检测失败，请检查 Key、URL 和网络";
       setAiPanelMessage(message);
       setStatus(message);
     } finally {
       setIsSavingAiSettings(false);
+      setIsDiagnosingAi(false);
     }
   };
 
@@ -2578,10 +2655,10 @@ export function App() {
         model,
         baseUrl: aiSettings.baseUrl
       });
-      setAiSettings(settings);
+      setAiSettings({ ...settings, availableModels: aiSettings.availableModels });
       setAiModelDraft(settings.model);
       setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(settings.baseUrl));
-      setAiConnectionDiagnostic(undefined);
+      setAiConnectionDiagnostic((current) => current ? { ...current, model: settings.model, modelAvailable: true } : current);
       setAiPanelMessage(`已切换模型：${settings.model}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "AI 模型切换失败";
@@ -2592,34 +2669,37 @@ export function App() {
     }
   };
 
-  const runAiConnectionDiagnostic = async () => {
-    if (!isAiRuntimeAvailable()) {
-      setAiPanelMessage("AI 连接诊断需要桌面端或本地开发调试桥");
-      return;
-    }
-    setIsDiagnosingAi(true);
-    setAiPanelMessage("正在诊断 AI 连接，不会显示 API key 或私有地址");
+  const clearCurrentAiSettings = async () => {
+    if (!isAiRuntimeAvailable()) return;
+    setIsSavingAiSettings(true);
     try {
-      const diagnostic = await diagnoseAiConnection();
-      setAiConnectionDiagnostic(diagnostic);
-      setAiPanelMessage(diagnostic.message);
+      const settings = await clearAiSettings();
+      setAiSettings(settings);
+      setAiApiKeyDraft("");
+      setAiModelDraft(settings.model);
+      setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(settings.baseUrl));
+      setAiConnectionDiagnostic(undefined);
+      setAiPanelMessage("AI 配置已清空");
+      setStatus("AI 配置已清空");
     } catch (error) {
-      const explanation = explainAiFailureReason(error instanceof Error ? error.message : "AI 连接诊断失败");
-      const diagnostic: AiConnectionDiagnostic = {
-        status: "failed",
-        hasApiKey: aiSettings.hasApiKey,
-        model: aiSettings.model,
-        modelAvailable: false,
-        modelCount: 0,
-        availableModels: [],
-        message: `AI 连接诊断失败：${explanation.message}`
-      };
-      setAiConnectionDiagnostic(diagnostic);
-      setAiPanelMessage(diagnostic.message);
+      const message = error instanceof Error ? error.message : "AI 配置清空失败";
+      setAiPanelMessage(message);
+      setStatus(message);
     } finally {
-      setIsDiagnosingAi(false);
+      setIsSavingAiSettings(false);
     }
   };
+
+  useEffect(() => {
+    if (
+      aiPanelVisitToken === 0 ||
+      !isAiSettingsHydrated ||
+      !aiSettings.hasApiKey ||
+      isDiagnosingAi ||
+      aiConnectionDiagnostic?.status === "passed"
+    ) return;
+    void diagnoseSavedAiSettings(aiSettings);
+  }, [aiPanelVisitToken, isAiSettingsHydrated, aiSettings.hasApiKey]);
 
   const runAiTuning = async (mode: AiTuningMode) => {
     if (!selectedAsset || !selectedAssetAiCapable) {
@@ -2710,7 +2790,7 @@ export function App() {
           const explanation = explainAiFailureReason(error instanceof Error ? error.message : "远端 AI 请求失败");
           fallbackReason = explanation.message;
           fallbackHint =
-            "下一步：点击“诊断 AI 连接”，重点检查模型列表、当前模型是否可用、图片输入通道和 JSON 参数返回。本次已保留本地候选，原图未改变。";
+            "下一步：重新打开 AI 面板触发配置检测；如仍失败，请重新填写 Key 和 URL 后点击“确认设置”。本次已保留本地候选，原图未改变。";
           result = {
             ...localResult,
             summary: `${localResult.summary} 远端 AI 暂不可用（${fallbackReason}），已使用本地色彩科学候选。`
@@ -2719,7 +2799,7 @@ export function App() {
       } else {
         fallbackReason = isAiRuntimeAvailable() ? "AI key 尚未保存" : "当前不是桌面运行时或开发调试桥";
         fallbackHint = isAiRuntimeAvailable()
-          ? "下一步：保存 API key 和 Base URL 后点击“诊断 AI 连接”，确认模型列表和当前模型可用。"
+          ? "下一步：填写 API key 和 Base URL 后点击“确认设置”，App 会自动检测配置并获取可用模型。"
           : "下一步：请在 Windows/macOS 桌面版中配置 AI，或使用 npm run dev 启动本地开发调试桥。";
       }
 
@@ -4655,12 +4735,12 @@ export function App() {
               title="AI"
               subtitle={aiSettings.hasApiKey ? `已配置 · ${aiSettings.model}` : "设置后可调色/追色"}
               isOpen={openGroups.ai}
-              onToggle={() => toggleGroup("ai")}
+              onToggle={toggleAiGroup}
               className="ai-menu-section"
               testId="accordion-ai-trigger"
             >
               <section className="ai-panel">
-                {aiSettings.hasApiKey && aiSettings.availableModels.length > 0 && !isAiConfigEditing ? (
+                {aiSettings.hasApiKey && aiSettings.availableModels.length > 0 && aiConnectionDiagnostic?.status === "passed" ? (
                   <div className="ai-config-summary">
                     <label>
                       <span>模型</span>
@@ -4679,12 +4759,13 @@ export function App() {
                     </label>
                     <button
                       type="button"
-                      data-testid="ai-edit-config-button"
-                      onClick={() => setIsAiConfigEditing(true)}
+                      className="ai-clear-config-button"
+                      data-testid="ai-clear-config-button"
+                      onClick={clearCurrentAiSettings}
                       disabled={isSavingAiSettings || isDiagnosingAi || isAiTuning}
                     >
-                      <SlidersHorizontal size={16} />
-                      修改 AI 配置
+                      <Trash2 size={16} />
+                      清空配置
                     </button>
                   </div>
                 ) : (
@@ -4698,7 +4779,11 @@ export function App() {
                           value={aiApiKeyDraft}
                           placeholder={aiSettings.hasApiKey ? "已保存，留空则保留" : "保存到系统钥匙串"}
                           autoComplete="new-password"
-                          onChange={(event) => setAiApiKeyDraft(event.target.value)}
+                          disabled={isSavingAiSettings || isDiagnosingAi}
+                          onChange={(event) => {
+                            setAiConnectionDiagnostic(undefined);
+                            setAiApiKeyDraft(event.target.value);
+                          }}
                         />
                       </label>
                       <label className="ai-settings-wide">
@@ -4708,34 +4793,36 @@ export function App() {
                           value={aiBaseUrlDraft}
                           placeholder="https://api.openai.com/v1"
                           autoComplete="off"
-                          onChange={(event) => setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(event.target.value))}
+                          disabled={isSavingAiSettings || isDiagnosingAi}
+                          onChange={(event) => {
+                            setAiConnectionDiagnostic(undefined);
+                            setAiBaseUrlDraft(sanitizeAiBaseUrlForDisplay(event.target.value));
+                          }}
                           onBlur={() => setAiBaseUrlDraft((current) => sanitizeAiBaseUrlForDisplay(current))}
                         />
                       </label>
                     </div>
-                    <button data-testid="ai-save-settings-button" onClick={saveCurrentAiSettings} disabled={!isAiRuntimeAvailable() || isSavingAiSettings}>
-                      {isSavingAiSettings ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
-                      {isSavingAiSettings ? "保存并获取模型中" : "保存 AI 设置并获取模型"}
-                    </button>
+                    <div className="ai-config-actions">
+                      <button data-testid="ai-save-settings-button" onClick={saveCurrentAiSettings} disabled={!isAiRuntimeAvailable() || isSavingAiSettings || isDiagnosingAi}>
+                        {isSavingAiSettings || isDiagnosingAi ? <Loader2 size={16} className="spin" /> : <Check size={16} />}
+                        {isSavingAiSettings || isDiagnosingAi ? "正在检测" : "确认设置"}
+                      </button>
+                      {aiSettings.hasApiKey && (
+                        <button type="button" className="ai-clear-config-button" onClick={clearCurrentAiSettings} disabled={isSavingAiSettings || isDiagnosingAi}>
+                          <Trash2 size={16} />
+                          清空配置
+                        </button>
+                      )}
+                    </div>
                   </>
                 )}
-                <button
-                  type="button"
-                  data-testid="ai-diagnose-connection-button"
-                  onClick={runAiConnectionDiagnostic}
-                  disabled={!isAiRuntimeAvailable() || isSavingAiSettings || isDiagnosingAi || isAiTuning}
-                >
-                  {isDiagnosingAi ? <Loader2 size={16} className="spin" /> : <ClipboardCheck size={16} />}
-                  {isDiagnosingAi ? "诊断 AI 连接中" : "诊断 AI 连接"}
-                </button>
-                {aiConnectionDiagnostic && (
-                  <div className={`ai-connection-diagnostic ${aiConnectionDiagnostic.status}`} data-testid="ai-connection-diagnostic">
-                    <strong>{aiConnectionDiagnostic.status === "passed" ? "连接正常" : "需要处理"}</strong>
+                {isDiagnosingAi && (
+                  <div className="ai-config-checking" role="status" aria-live="polite" data-testid="ai-config-checking">
+                    <Loader2 size={20} className="spin" />
                     <span>
-                      模型 {aiConnectionDiagnostic.model} · {aiConnectionDiagnostic.modelAvailable ? "当前模型可用" : "当前模型待确认"} · 已获取{" "}
-                      {aiConnectionDiagnostic.modelCount} 个模型
+                      <strong>正在检测 AI 配置</strong>
+                      <small>正在验证连接并获取可用模型，请稍候</small>
                     </span>
-                    <p>{aiConnectionDiagnostic.message}</p>
                   </div>
                 )}
                 <label className="ai-instruction-field">

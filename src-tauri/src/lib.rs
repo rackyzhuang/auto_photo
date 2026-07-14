@@ -499,7 +499,7 @@ fn build_ai_connection_diagnostic(
             model_available: false,
             model_count: 0,
             available_models: Vec::new(),
-            message: "AI key 尚未保存；请先保存 API key 后再诊断连接。".to_string(),
+            message: "AI key 尚未保存；请先填写 API key 和 Base URL 并确认设置。".to_string(),
         };
     }
 
@@ -512,12 +512,12 @@ fn build_ai_connection_diagnostic(
                     .iter()
                     .any(|model| model == &settings.model);
             let message = if model_count == 0 {
-                "AI 连接诊断通过：模型列表为空，已保留当前手动模型用于调色请求。".to_string()
+                "AI 配置检测通过：模型列表为空，已保留当前手动模型用于调色请求。".to_string()
             } else if model_available {
-                format!("AI 连接诊断通过：已获取 {model_count} 个模型，当前模型可用。")
+                format!("AI 配置检测通过：已获取 {model_count} 个模型，当前模型可用。")
             } else {
                 format!(
-                    "AI 连接诊断通过：已获取 {model_count} 个模型，但当前模型不在模型列表中，请切换可用模型。"
+                    "AI 配置检测通过：已获取 {model_count} 个模型，但当前模型不在模型列表中，请切换可用模型。"
                 )
             };
             AiConnectionDiagnostic {
@@ -538,7 +538,7 @@ fn build_ai_connection_diagnostic(
             model_count: 0,
             available_models: Vec::new(),
             message: format!(
-                "AI 连接诊断未通过：{}。请检查 API key、Base URL、/v1 路径、模型权限或网络。",
+                "AI 配置检测未通过：{}。请检查 API key、Base URL、/v1 路径、模型权限或网络。",
                 error.chars().take(120).collect::<String>()
             ),
         },

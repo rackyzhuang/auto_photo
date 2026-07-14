@@ -570,12 +570,26 @@ button:disabled {
   gap: 8px;
 }
 
-.mobile-ai-config-status {
-  display: inline-flex;
-  min-height: 38px;
+.mobile-ai-checking {
+  display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
+  padding: 7px 0;
   color: #b8c5d2;
+}
+
+.mobile-ai-checking > span {
+  display: grid;
+  gap: 2px;
+}
+
+.mobile-ai-checking strong {
+  color: #eef5fb;
+  font-size: 13px;
+}
+
+.mobile-ai-checking small {
+  color: #9ca8b5;
   font-size: 12px;
 }
 
@@ -1978,6 +1992,67 @@ h2 {
   padding: 0 9px;
   color: #dce8ef;
   background: #171b21;
+  font-size: 12px;
+}
+
+.ai-config-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.ai-config-actions button,
+.ai-clear-config-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid rgba(143, 191, 232, 0.28);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: #dce8ef;
+  background: #232830;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ai-config-actions button:hover:not(:disabled) {
+  border-color: rgba(143, 191, 232, 0.62);
+}
+
+.ai-config-actions .ai-clear-config-button,
+.ai-config-summary .ai-clear-config-button {
+  border-color: rgba(224, 105, 105, 0.42);
+  color: #f1b0b0;
+}
+
+.ai-config-actions .ai-clear-config-button:hover:not(:disabled),
+.ai-config-summary .ai-clear-config-button:hover:not(:disabled) {
+  border-color: rgba(224, 105, 105, 0.72);
+  background: rgba(150, 55, 55, 0.2);
+}
+
+.ai-config-checking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  color: #b8c5d2;
+}
+
+.ai-config-checking > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ai-config-checking strong {
+  color: #eef5fb;
+  font-size: 13px;
+}
+
+.ai-config-checking small {
+  color: #9ca8b5;
   font-size: 12px;
 }
 
