@@ -1,5 +1,11 @@
 import type { EditParams } from "../types";
-import type { PortraitAnalysis } from "./portraitBeautify";
+import { applyMakeup } from "./makeupRenderer";
+import {
+  PORTRAIT_SEGMENTATION_CATEGORY,
+  type PortraitAnalysis,
+  type PortraitLandmark,
+  type PortraitSegmentation
+} from "./portraitBeautify";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -299,6 +305,138 @@ const isTeethLikePixel = (red: number, green: number, blue: number) => {
   return luma > 118 && max - min < 72 && red >= blue - 10 && green >= blue - 18;
 };
 
+const getCb = (red: number, green: number, blue: number) => 128 - 0.114572 * red - 0.385428 * green + 0.5 * blue;
+
+const getCr = (red: number, green: number, blue: number) => 128 + 0.5 * red - 0.454153 * green - 0.045847 * blue;
+
+const rgbToYCbCr = (red: number, green: number, blue: number): [number, number, number] => [
+  getLuma(red, green, blue),
+  getCb(red, green, blue),
+  getCr(red, green, blue)
+];
+
+const yCbCrToRgb = (luma: number, cb: number, cr: number): [number, number, number] => {
+  const blueDifference = cb - 128;
+  const redDifference = cr - 128;
+  return [
+    luma + 1.5748 * redDifference,
+    luma - 0.187324 * blueDifference - 0.468124 * redDifference,
+    luma + 1.8556 * blueDifference
+  ];
+};
+
+const rangeWeight = (value: number, min: number, max: number, feather: number) =>
+  clamp((value - min + feather) / feather, 0, 1) * clamp((max + feather - value) / feather, 0, 1);
+
+const getSkinColorWeight = (red: number, green: number, blue: number) => {
+  const luma = getLuma(red, green, blue);
+  const cb = getCb(red, green, blue);
+  const cr = getCr(red, green, blue);
+  const chromaWeight = rangeWeight(cb, 77, 135, 18) * rangeWeight(cr, 125, 190, 20);
+  return chromaWeight * clamp((luma - 7) / 24, 0, 1) * clamp((252 - luma) / 18, 0, 1);
+};
+
+interface EllipseRegion {
+  centerX: number;
+  centerY: number;
+  radiusX: number;
+  radiusY: number;
+}
+
+interface FaceRetouchRegion extends EllipseRegion {
+  featureRegions: EllipseRegion[];
+  mouthRegion?: EllipseRegion;
+}
+
+const getLandmarkPixel = (landmarks: PortraitLandmark[], index: number, width: number, height: number) => {
+  const point = landmarks[index];
+  return point ? { x: point.x * width, y: point.y * height } : undefined;
+};
+
+const getEllipseWeight = (region: EllipseRegion, x: number, y: number) => {
+  const dx = (x - region.centerX) / region.radiusX;
+  const dy = (y - region.centerY) / region.radiusY;
+  const distanceSquared = dx * dx + dy * dy;
+  return distanceSquared < 1 ? (1 - distanceSquared) * (1 - distanceSquared) : 0;
+};
+
+const createFeatureEllipse = (
+  landmarks: PortraitLandmark[],
+  indices: number[],
+  width: number,
+  height: number,
+  paddingX: number,
+  paddingY: number
+) => {
+  const points = indices
+    .map((index) => getLandmarkPixel(landmarks, index, width, height))
+    .filter((point): point is NonNullable<typeof point> => Boolean(point));
+  if (points.length === 0) return undefined;
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxY = Math.max(...points.map((point) => point.y));
+  return {
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+    radiusX: Math.max(2, (maxX - minX) * paddingX),
+    radiusY: Math.max(2, (maxY - minY) * paddingY)
+  };
+};
+
+const weightedMedian = (histogram: Float64Array) => {
+  let total = 0;
+  for (let index = 0; index < histogram.length; index += 1) total += histogram[index];
+  if (total <= 0) return undefined;
+  let cumulative = 0;
+  for (let index = 0; index < histogram.length; index += 1) {
+    cumulative += histogram[index];
+    if (cumulative >= total / 2) return index;
+  }
+  return histogram.length - 1;
+};
+
+interface SegmentationSoftMasks {
+  faceSkin: Uint8Array;
+  bodySkin: Uint8Array;
+  clothes: Uint8Array;
+}
+
+const segmentationSoftMaskCache = new WeakMap<PortraitSegmentation, SegmentationSoftMasks>();
+
+const createSegmentationSoftMask = (segmentation: PortraitSegmentation, category: number) => {
+  const output = new Uint8Array(segmentation.categories.length);
+  for (let y = 0; y < segmentation.height; y += 1) {
+    for (let x = 0; x < segmentation.width; x += 1) {
+      let matched = 0;
+      let total = 0;
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          const sampleX = clamp(x + offsetX, 0, segmentation.width - 1);
+          const sampleY = clamp(y + offsetY, 0, segmentation.height - 1);
+          const weight = offsetX === 0 && offsetY === 0 ? 4 : Math.abs(offsetX) + Math.abs(offsetY) === 1 ? 2 : 1;
+          if (segmentation.categories[sampleY * segmentation.width + sampleX] === category) matched += weight;
+          total += weight;
+        }
+      }
+      output[y * segmentation.width + x] = Math.round((matched / total) * 255);
+    }
+  }
+  return output;
+};
+
+const getSegmentationSoftMasks = (segmentation: PortraitSegmentation) => {
+  const cached = segmentationSoftMaskCache.get(segmentation);
+  if (cached) return cached;
+  const masks = {
+    faceSkin: createSegmentationSoftMask(segmentation, PORTRAIT_SEGMENTATION_CATEGORY.faceSkin),
+    bodySkin: createSegmentationSoftMask(segmentation, PORTRAIT_SEGMENTATION_CATEGORY.bodySkin),
+    clothes: createSegmentationSoftMask(segmentation, PORTRAIT_SEGMENTATION_CATEGORY.clothes)
+  };
+  segmentationSoftMaskCache.set(segmentation, masks);
+  return masks;
+};
+
 const applyPortraitRetouch = (imageData: ImageData, edits: EditParams, portraitAnalysis?: PortraitAnalysis) => {
   const skinSmoothing = clamp(edits.skinSmoothing / 100, 0, 1);
   const skinTone = clamp(edits.skinTone / 100, -1, 1);
@@ -317,7 +455,9 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams, portraitA
 
   const { data, width, height } = imageData;
   const source = new Uint8ClampedArray(data);
-  const faceRegions = (portraitAnalysis?.faces ?? [])
+  const segmentation = portraitAnalysis?.segmentation;
+  const segmentationMasks = segmentation ? getSegmentationSoftMasks(segmentation) : undefined;
+  const faceRegions: FaceRetouchRegion[] = (portraitAnalysis?.faces ?? [])
     .map((face) => {
       const xs = face.map((landmark) => landmark.x * width);
       const ys = face.map((landmark) => landmark.y * height);
@@ -326,53 +466,197 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams, portraitA
       const maxX = Math.max(...xs);
       const minY = Math.min(...ys);
       const maxY = Math.max(...ys);
+      const leftEye = createFeatureEllipse(face, [33, 133, 159, 145], width, height, 0.82, 1.2);
+      const rightEye = createFeatureEllipse(face, [362, 263, 386, 374], width, height, 0.82, 1.2);
+      const mouthRegion = createFeatureEllipse(face, [61, 291, 13, 14, 78, 308], width, height, 0.7, 1.05);
       return {
         centerX: (minX + maxX) / 2,
         centerY: (minY + maxY) / 2,
         radiusX: Math.max(1, (maxX - minX) * 0.54),
-        radiusY: Math.max(1, (maxY - minY) * 0.53)
+        radiusY: Math.max(1, (maxY - minY) * 0.53),
+        featureRegions: [leftEye, rightEye, mouthRegion].filter(
+          (region): region is NonNullable<typeof region> => Boolean(region)
+        ),
+        mouthRegion
       };
     })
     .filter((region): region is NonNullable<typeof region> => Boolean(region));
+
   const getFaceWeight = (x: number, y: number) => {
     let weight = 0;
+    faceRegions.forEach((region) => { weight = Math.max(weight, getEllipseWeight(region, x, y)); });
+    return weight;
+  };
+
+  const getFeatureProtection = (x: number, y: number) => {
+    let weight = 0;
     faceRegions.forEach((region) => {
-      const dx = (x - region.centerX) / region.radiusX;
-      const dy = (y - region.centerY) / region.radiusY;
-      const distanceSquared = dx * dx + dy * dy;
-      if (distanceSquared < 1) weight = Math.max(weight, (1 - distanceSquared) * (1 - distanceSquared));
+      region.featureRegions.forEach((feature) => { weight = Math.max(weight, getEllipseWeight(feature, x, y)); });
     });
     return weight;
   };
 
-  let skinTargetRed = 0;
-  let skinTargetGreen = 0;
-  let skinTargetBlue = 0;
-  let skinTargetLuma = 0;
-  let skinTargetWeight = 0;
-  if (skinToneUniformity > 0 && faceRegions.length > 0) {
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
+  const getMouthWeight = (x: number, y: number) => {
+    let weight = 0;
+    faceRegions.forEach((region) => {
+      if (region.mouthRegion) weight = Math.max(weight, getEllipseWeight(region.mouthRegion, x, y));
+    });
+    return weight;
+  };
+
+  const torsoRegions = (portraitAnalysis?.poses ?? [])
+    .map((pose) => {
+      const leftShoulder = getLandmarkPixel(pose, 11, width, height);
+      const rightShoulder = getLandmarkPixel(pose, 12, width, height);
+      const leftHip = getLandmarkPixel(pose, 23, width, height);
+      const rightHip = getLandmarkPixel(pose, 24, width, height);
+      if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return undefined;
+      const top = (leftShoulder.y + rightShoulder.y) / 2;
+      const bottom = (leftHip.y + rightHip.y) / 2;
+      if (bottom - top < 12) return undefined;
+      return { leftShoulder, rightShoulder, leftHip, rightHip, top, bottom };
+    })
+    .filter((region): region is NonNullable<typeof region> => Boolean(region));
+
+  const getTorsoWeight = (x: number, y: number) => {
+    let weight = 0;
+    torsoRegions.forEach((region) => {
+      const vertical = clamp((y - region.top) / (region.bottom - region.top), 0, 1);
+      if (y < region.top || y > region.bottom + (region.bottom - region.top) * 0.12) return;
+      const left = region.leftShoulder.x + (region.leftHip.x - region.leftShoulder.x) * vertical;
+      const right = region.rightShoulder.x + (region.rightHip.x - region.rightShoulder.x) * vertical;
+      const minX = Math.min(left, right);
+      const maxX = Math.max(left, right);
+      const feather = Math.max(4, (maxX - minX) * 0.12);
+      const horizontalWeight = clamp((x - minX) / feather, 0, 1) * clamp((maxX - x) / feather, 0, 1);
+      const verticalWeight = clamp((y - region.top) / feather, 0, 1) * clamp((region.bottom + feather - y) / feather, 0, 1);
+      weight = Math.max(weight, horizontalWeight * verticalWeight);
+    });
+    return weight;
+  };
+
+  const getSegmentationCategoryAt = (x: number, y: number) => {
+    if (!segmentation) return -1;
+    const maskX = clamp(Math.floor(((x + 0.5) / width) * segmentation.width), 0, segmentation.width - 1);
+    const maskY = clamp(Math.floor(((y + 0.5) / height) * segmentation.height), 0, segmentation.height - 1);
+    return segmentation.categories[maskY * segmentation.width + maskX] ?? -1;
+  };
+
+  const getSegmentationWeight = (x: number, y: number, mask: Uint8Array) => {
+    if (!segmentation) return 0;
+    const maskX = clamp(((x + 0.5) / width) * segmentation.width - 0.5, 0, segmentation.width - 1);
+    const maskY = clamp(((y + 0.5) / height) * segmentation.height - 0.5, 0, segmentation.height - 1);
+    const x0 = Math.floor(maskX);
+    const y0 = Math.floor(maskY);
+    const x1 = Math.min(segmentation.width - 1, x0 + 1);
+    const y1 = Math.min(segmentation.height - 1, y0 + 1);
+    const tx = maskX - x0;
+    const ty = maskY - y0;
+    const top = mask[y0 * segmentation.width + x0] * (1 - tx) + mask[y0 * segmentation.width + x1] * tx;
+    const bottom = mask[y1 * segmentation.width + x0] * (1 - tx) + mask[y1 * segmentation.width + x1] * tx;
+    return (top * (1 - ty) + bottom * ty) / 255;
+  };
+
+  const getSkinWeights = (x: number, y: number, red: number, green: number, blue: number) => {
+    const colorWeight = getSkinColorWeight(red, green, blue);
+    const faceWeight = getFaceWeight(x, y);
+    const featureGuard = faceWeight > 0 ? 1 - getFeatureProtection(x, y) * 0.96 : 1;
+    if (!segmentation) {
+      const fallback = colorWeight * faceWeight * featureGuard;
+      return { all: fallback, face: fallback, faceRegion: faceWeight };
+    }
+    const faceSkin = getSegmentationWeight(x, y, segmentationMasks!.faceSkin) * featureGuard;
+    const bodySkin = getSegmentationWeight(x, y, segmentationMasks!.bodySkin) * 0.72;
+    const segmentationWeight = Math.max(faceSkin, bodySkin);
+    const reliableColorWeight = 0.38 + colorWeight * 0.62;
+    return {
+      all: segmentationWeight * reliableColorWeight,
+      face: faceSkin * reliableColorWeight,
+      faceRegion: Math.max(faceWeight, faceSkin)
+    };
+  };
+
+  const getClothingWeight = (x: number, y: number) =>
+    segmentation
+      ? getSegmentationWeight(x, y, segmentationMasks!.clothes)
+      : getTorsoWeight(x, y);
+
+  const getFilteredColor = (x: number, y: number, radius: number, mode: "skin" | "clothes") => {
+    const index = (y * width + x) * 4;
+    const centerRed = source[index];
+    const centerGreen = source[index + 1];
+    const centerBlue = source[index + 2];
+    const centerLuma = getLuma(centerRed, centerGreen, centerBlue);
+    const centerCb = getCb(centerRed, centerGreen, centerBlue);
+    const centerCr = getCr(centerRed, centerGreen, centerBlue);
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let totalWeight = 0;
+    for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+      const sampleY = y + offsetY;
+      if (sampleY < 0 || sampleY >= height) continue;
+      for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+        const sampleX = x + offsetX;
+        if (sampleX < 0 || sampleX >= width) continue;
+        const category = getSegmentationCategoryAt(sampleX, sampleY);
+        if (
+          segmentation &&
+          mode === "skin" &&
+          category !== PORTRAIT_SEGMENTATION_CATEGORY.faceSkin &&
+          category !== PORTRAIT_SEGMENTATION_CATEGORY.bodySkin
+        ) continue;
+        if (segmentation && mode === "clothes" && category !== PORTRAIT_SEGMENTATION_CATEGORY.clothes) continue;
+        const sampleIndex = (sampleY * width + sampleX) * 4;
+        const sampleRed = source[sampleIndex];
+        const sampleGreen = source[sampleIndex + 1];
+        const sampleBlue = source[sampleIndex + 2];
+        const sampleLuma = getLuma(sampleRed, sampleGreen, sampleBlue);
+        const sampleCb = getCb(sampleRed, sampleGreen, sampleBlue);
+        const sampleCr = getCr(sampleRed, sampleGreen, sampleBlue);
+        const spatialDistance = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+        const spatialWeight = 1 - spatialDistance / (radius * 1.45 + 0.01);
+        const lumaTolerance = mode === "skin" ? 38 : 54;
+        const chromaTolerance = mode === "skin" ? 38 : 26;
+        const lumaWeight = clamp(1 - Math.abs(sampleLuma - centerLuma) / lumaTolerance, 0, 1);
+        const chromaWeight = clamp(1 - (Math.abs(sampleCb - centerCb) + Math.abs(sampleCr - centerCr)) / chromaTolerance, 0, 1);
+        const weight = Math.max(0.02, spatialWeight) * (0.12 + lumaWeight * 0.88) * (0.08 + chromaWeight * 0.92);
+        red += sampleRed * weight;
+        green += sampleGreen * weight;
+        blue += sampleBlue * weight;
+        totalWeight += weight;
+      }
+    }
+    const divisor = totalWeight || 1;
+    const filteredRed = red / divisor;
+    const filteredGreen = green / divisor;
+    const filteredBlue = blue / divisor;
+    return { red: filteredRed, green: filteredGreen, blue: filteredBlue, luma: getLuma(filteredRed, filteredGreen, filteredBlue) };
+  };
+
+  let skinTargetCb: number | undefined;
+  let skinTargetCr: number | undefined;
+  if (skinToneUniformity > 0 && (faceRegions.length > 0 || segmentation)) {
+    const cbHistogram = new Float64Array(256);
+    const crHistogram = new Float64Array(256);
+    const sampleStep = Math.max(1, Math.floor(Math.max(width, height) / 900));
+    for (let y = 0; y < height; y += sampleStep) {
+      for (let x = 0; x < width; x += sampleStep) {
         const index = (y * width + x) * 4;
         const red = source[index];
         const green = source[index + 1];
         const blue = source[index + 2];
-        if (!isSkinLikePixel(red, green, blue)) continue;
-        const weight = getFaceWeight(x, y);
-        if (weight <= 0) continue;
-        skinTargetRed += red * weight;
-        skinTargetGreen += green * weight;
-        skinTargetBlue += blue * weight;
-        skinTargetLuma += getLuma(red, green, blue) * weight;
-        skinTargetWeight += weight;
+        const [luma, cb, cr] = rgbToYCbCr(red, green, blue);
+        if (luma < 20 || luma > 242) continue;
+        const skinWeights = getSkinWeights(x, y, red, green, blue);
+        if (skinWeights.all <= 0.08) continue;
+        const weight = skinWeights.all * (0.45 + clamp((luma - 20) / 80, 0, 1) * 0.55);
+        cbHistogram[clamp(Math.round(cb), 0, 255)] += weight;
+        crHistogram[clamp(Math.round(cr), 0, 255)] += weight;
       }
     }
-    if (skinTargetWeight > 0) {
-      skinTargetRed /= skinTargetWeight;
-      skinTargetGreen /= skinTargetWeight;
-      skinTargetBlue /= skinTargetWeight;
-      skinTargetLuma /= skinTargetWeight;
-    }
+    skinTargetCb = weightedMedian(cbHistogram);
+    skinTargetCr = weightedMedian(crHistogram);
   }
 
   for (let y = 1; y < height - 1; y += 1) {
@@ -382,117 +666,74 @@ const applyPortraitRetouch = (imageData: ImageData, edits: EditParams, portraitA
       const green = source[index + 1];
       const blue = source[index + 2];
       const luma = getLuma(red, green, blue);
-      const skinMask = isSkinLikePixel(red, green, blue) ? 1 : 0;
-      const teethMask = isTeethLikePixel(red, green, blue) && !skinMask ? 1 : 0;
-      const faceWeight = wrinkleReduction > 0 || skinToneUniformity > 0 ? getFaceWeight(x, y) : 0;
-
-      let blurRed = 0;
-      let blurGreen = 0;
-      let blurBlue = 0;
-      let totalWeight = 0;
-
-      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-          const neighborIndex = ((y + offsetY) * width + x + offsetX) * 4;
-          const neighborLuma = getLuma(source[neighborIndex], source[neighborIndex + 1], source[neighborIndex + 2]);
-          const edgeWeight = clamp(1 - Math.abs(luma - neighborLuma) / 42, 0, 1);
-          const weight = offsetX === 0 && offsetY === 0 ? 1 : edgeWeight;
-          blurRed += source[neighborIndex] * weight;
-          blurGreen += source[neighborIndex + 1] * weight;
-          blurBlue += source[neighborIndex + 2] * weight;
-          totalWeight += weight;
-        }
-      }
-
-      blurRed /= totalWeight || 1;
-      blurGreen /= totalWeight || 1;
-      blurBlue /= totalWeight || 1;
+      const skinWeights = getSkinWeights(x, y, red, green, blue);
+      const mouthWeight = teethWhitening > 0 ? getMouthWeight(x, y) : 0;
+      const teethMask = mouthWeight * (isTeethLikePixel(red, green, blue) ? 1 : 0);
 
       let nextRed = data[index];
       let nextGreen = data[index + 1];
       let nextBlue = data[index + 2];
 
-      if (skinMask > 0) {
-        const blurLuma = getLuma(blurRed, blurGreen, blurBlue);
-        const wrinkleMask = clamp((Math.abs(luma - blurLuma) - 1.5) / 16, 0, 1);
-        const wrinkleAmount = wrinkleReduction * faceWeight * (0.28 + wrinkleMask * 0.5);
-        const smoothAmount = clamp(skinSmoothing * 0.62 + wrinkleAmount, 0, 0.84);
-        nextRed = nextRed * (1 - smoothAmount) + blurRed * smoothAmount;
-        nextGreen = nextGreen * (1 - smoothAmount) + blurGreen * smoothAmount;
-        nextBlue = nextBlue * (1 - smoothAmount) + blurBlue * smoothAmount;
-
-        if (skinToneUniformity > 0 && faceWeight > 0 && skinTargetWeight > 0) {
-          const localLumaOffset = luma - skinTargetLuma;
-          const uniformAmount = skinToneUniformity * faceWeight * 0.58;
-          const targetRed = skinTargetRed + localLumaOffset * 0.88;
-          const targetGreen = skinTargetGreen + localLumaOffset * 0.94;
-          const targetBlue = skinTargetBlue + localLumaOffset * 0.9;
-          nextRed = nextRed * (1 - uniformAmount) + targetRed * uniformAmount;
-          nextGreen = nextGreen * (1 - uniformAmount) + targetGreen * uniformAmount;
-          nextBlue = nextBlue * (1 - uniformAmount) + targetBlue * uniformAmount;
-        }
-
-        if (skinTone !== 0) {
-          const toneAmount = skinTone * 9;
-          nextRed = nextRed + toneAmount * 0.8;
-          nextGreen = nextGreen + Math.abs(toneAmount) * 0.18;
-          nextBlue = nextBlue - toneAmount * 0.16;
-          const gray = getLuma(nextRed, nextGreen, nextBlue);
-          const saturationFactor = 1 + Math.abs(skinTone) * 0.08;
-          nextRed = gray + (nextRed - gray) * saturationFactor;
-          nextGreen = gray + (nextGreen - gray) * saturationFactor;
-          nextBlue = gray + (nextBlue - gray) * saturationFactor;
-        }
-      } else if (teethMask > 0) {
+      if (teethMask > 0) {
         const amount = teethWhitening * 0.68;
         const target = Math.min(245, luma + 28 * amount);
-        nextRed = nextRed * (1 - amount) + target * amount;
-        nextGreen = nextGreen * (1 - amount) + target * amount;
-        nextBlue = nextBlue * (1 - amount) + (target + 8 * amount) * amount;
-      } else if (clothingWrinkleReduction > 0) {
-        let clothRed = red * 1.8;
-        let clothGreen = green * 1.8;
-        let clothBlue = blue * 1.8;
-        let clothWeight = 1.8;
-
-        for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
-          for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
-            if ((offsetX === 0 && offsetY === 0) || Math.abs(offsetX) + Math.abs(offsetY) > 3) continue;
-            const sampleX = x + offsetX;
-            const sampleY = y + offsetY;
-            if (sampleX < 0 || sampleY < 0 || sampleX >= width || sampleY >= height) continue;
-            const neighborIndex = (sampleY * width + sampleX) * 4;
-            const neighborRed = source[neighborIndex];
-            const neighborGreen = source[neighborIndex + 1];
-            const neighborBlue = source[neighborIndex + 2];
-            const neighborLuma = getLuma(neighborRed, neighborGreen, neighborBlue);
-            const edgeWeight = clamp(1 - Math.abs(luma - neighborLuma) / 58, 0, 1);
-            const distanceWeight = Math.abs(offsetX) + Math.abs(offsetY) <= 1 ? 1 : 0.62;
-            const weight = edgeWeight * distanceWeight;
-            clothRed += neighborRed * weight;
-            clothGreen += neighborGreen * weight;
-            clothBlue += neighborBlue * weight;
-            clothWeight += weight;
-          }
+        const blend = amount * teethMask;
+        nextRed = nextRed * (1 - blend) + target * blend;
+        nextGreen = nextGreen * (1 - blend) + target * blend;
+        nextBlue = nextBlue * (1 - blend) + (target + 6 * amount) * blend;
+      } else if (skinWeights.all > 0.025) {
+        if (skinSmoothing > 0 || (wrinkleReduction > 0 && skinWeights.face > 0)) {
+          const fine = getFilteredColor(x, y, 1, "skin");
+          const coarse = getFilteredColor(x, y, 2, "skin");
+          const mediumDetail = Math.abs(luma - coarse.luma);
+          const wrinkleMask = clamp((mediumDetail - 1.2) / 14, 0, 1);
+          const wrinkleAmount = wrinkleReduction * skinWeights.face * skinWeights.faceRegion * (0.12 + wrinkleMask * 0.42);
+          const edgeGuard = clamp(1 - mediumDetail / 38, 0.18, 1);
+          const smoothAmount = clamp(
+            (skinSmoothing * 0.48 * skinWeights.all + wrinkleAmount) * edgeGuard,
+            0,
+            0.68
+          );
+          const detailRetention = clamp(0.78 - skinSmoothing * 0.3 - wrinkleReduction * 0.16, 0.3, 0.78);
+          const targetRed = coarse.red + (red - fine.red) * detailRetention;
+          const targetGreen = coarse.green + (green - fine.green) * detailRetention;
+          const targetBlue = coarse.blue + (blue - fine.blue) * detailRetention;
+          nextRed = nextRed * (1 - smoothAmount) + targetRed * smoothAmount;
+          nextGreen = nextGreen * (1 - smoothAmount) + targetGreen * smoothAmount;
+          nextBlue = nextBlue * (1 - smoothAmount) + targetBlue * smoothAmount;
         }
 
-        clothRed /= clothWeight || 1;
-        clothGreen /= clothWeight || 1;
-        clothBlue /= clothWeight || 1;
-
-        const localContrast =
-          Math.abs(red - blurRed) +
-          Math.abs(green - blurGreen) +
-          Math.abs(blue - blurBlue) +
-          Math.abs(red - clothRed) * 0.65 +
-          Math.abs(green - clothGreen) * 0.65 +
-          Math.abs(blue - clothBlue) * 0.65;
-        const lumaMask = clamp((luma - 18) / 42, 0, 1) * clamp((246 - luma) / 48, 0, 1);
-        const wrinkleMask = lumaMask * clamp((localContrast - 5) / 58, 0, 1);
-        const amount = clothingWrinkleReduction * wrinkleMask * (0.68 + clothingWrinkleReduction * 0.24);
-        nextRed = nextRed * (1 - amount) + clothRed * amount;
-        nextGreen = nextGreen * (1 - amount) + clothGreen * amount;
-        nextBlue = nextBlue * (1 - amount) + clothBlue * amount;
+        let [adjustedLuma, adjustedCb, adjustedCr] = rgbToYCbCr(nextRed, nextGreen, nextBlue);
+        if (skinToneUniformity > 0 && skinTargetCb !== undefined && skinTargetCr !== undefined) {
+          const uniformAmount = skinToneUniformity * skinWeights.all * 0.68;
+          const cbCorrection = clamp(skinTargetCb - adjustedCb, -14, 14) * uniformAmount;
+          const crCorrection = clamp(skinTargetCr - adjustedCr, -14, 14) * uniformAmount;
+          adjustedCb += cbCorrection;
+          adjustedCr += crCorrection;
+        }
+        if (skinTone !== 0) {
+          adjustedLuma += Math.max(0, skinTone) * 2.2 * skinWeights.all;
+          adjustedCb -= skinTone * 3.2 * skinWeights.all;
+          adjustedCr += skinTone * 5.2 * skinWeights.all;
+        }
+        [nextRed, nextGreen, nextBlue] = yCbCrToRgb(adjustedLuma, adjustedCb, adjustedCr);
+      } else if (clothingWrinkleReduction > 0) {
+        const clothingWeight = getClothingWeight(x, y);
+        if (clothingWeight > 0.025) {
+          const fine = getFilteredColor(x, y, 1, "clothes");
+          const coarse = getFilteredColor(x, y, 3, "clothes");
+          const [, cb, cr] = rgbToYCbCr(red, green, blue);
+          const [, coarseCb, coarseCr] = rgbToYCbCr(coarse.red, coarse.green, coarse.blue);
+          const chromaDifference = Math.abs(cb - coarseCb) + Math.abs(cr - coarseCr);
+          const patternGuard = clamp(1 - chromaDifference / 24, 0, 1);
+          const wrinkleSignal = clamp((Math.abs(luma - coarse.luma) - 1.4) / 18, 0, 1);
+          const lumaGuard = clamp((luma - 14) / 38, 0, 1) * clamp((248 - luma) / 34, 0, 1);
+          const amount =
+            clothingWrinkleReduction * clothingWeight * patternGuard * lumaGuard * (0.16 + wrinkleSignal * 0.58);
+          const preservedDetail = (luma - fine.luma) * (0.52 - clothingWrinkleReduction * 0.18);
+          const targetLuma = luma + clamp(coarse.luma + preservedDetail - luma, -22, 22) * amount;
+          [nextRed, nextGreen, nextBlue] = yCbCrToRgb(targetLuma, cb, cr);
+        }
       }
 
       data[index] = clamp(nextRed, 0, 255);
@@ -617,6 +858,7 @@ export const applyEditPipeline = (imageData: ImageData, edits: EditParams, portr
   applyTransparencyDetail(imageData, edits.transparency, edits.skinProtection);
   applyLocalDetail(imageData, edits.clarity, edits.texture);
   applyPortraitRetouch(imageData, edits, portraitAnalysis);
+  applyMakeup(imageData, edits, portraitAnalysis);
   applyQualityEnhancement(imageData, edits.qualityEnhancement, edits.skinProtection);
   applySharpening(imageData, edits.sharpness);
   applyVignetteAndGrain(imageData, edits.vignette, edits.grain);

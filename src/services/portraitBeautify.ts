@@ -9,7 +9,23 @@ export interface PortraitLandmark {
 export interface PortraitAnalysis {
   faces: PortraitLandmark[][];
   poses: PortraitLandmark[][];
+  segmentation?: PortraitSegmentation;
 }
+
+export interface PortraitSegmentation {
+  width: number;
+  height: number;
+  categories: Uint8Array;
+}
+
+export const PORTRAIT_SEGMENTATION_CATEGORY = {
+  background: 0,
+  hair: 1,
+  bodySkin: 2,
+  faceSkin: 3,
+  clothes: 4,
+  others: 5
+} as const;
 
 interface WarpControl {
   kind: "translate" | "magnify" | "pinch-x";
@@ -30,9 +46,12 @@ interface VisionWasmFileset {
 const MAX_CACHE_ENTRIES = 12;
 const faceCache = new Map<string, Promise<PortraitLandmark[][]>>();
 const poseCache = new Map<string, Promise<PortraitLandmark[][]>>();
+const segmentationCache = new Map<string, Promise<PortraitSegmentation | undefined>>();
 let faceLandmarkerPromise: Promise<import("@mediapipe/tasks-vision").FaceLandmarker> | undefined;
 let poseLandmarkerPromise: Promise<import("@mediapipe/tasks-vision").PoseLandmarker> | undefined;
+let imageSegmenterPromise: Promise<import("@mediapipe/tasks-vision").ImageSegmenter | undefined> | undefined;
 let visionFilesetPromise: Promise<VisionWasmFileset> | undefined;
+let imageSegmenterUnavailable = false;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -96,6 +115,27 @@ const getPoseLandmarker = async () => {
   return poseLandmarkerPromise;
 };
 
+const getImageSegmenter = async () => {
+  if (imageSegmenterUnavailable) return undefined;
+  if (!imageSegmenterPromise) {
+    imageSegmenterPromise = Promise.all([import("@mediapipe/tasks-vision"), getVisionFileset()])
+      .then(([{ ImageSegmenter }, fileset]) =>
+        ImageSegmenter.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: publicAssetUrl("mediapipe/models/selfie_multiclass_256x256.tflite") },
+          runningMode: "IMAGE",
+          outputCategoryMask: true,
+          outputConfidenceMasks: false
+        })
+      )
+      .catch(() => {
+        imageSegmenterPromise = undefined;
+        imageSegmenterUnavailable = true;
+        return undefined;
+      });
+  }
+  return imageSegmenterPromise;
+};
+
 const trimCache = <Value>(cache: Map<string, Value>) => {
   while (cache.size > MAX_CACHE_ENTRIES) {
     const oldestKey = cache.keys().next().value;
@@ -139,25 +179,69 @@ const detectPoses = (canvas: HTMLCanvasElement, cacheKey: string) => {
   return pending;
 };
 
+const detectSegmentation = (canvas: HTMLCanvasElement, cacheKey: string) => {
+  const cached = segmentationCache.get(cacheKey);
+  if (cached) return cached;
+  const pending = getImageSegmenter()
+    .then((segmenter) => {
+      if (!segmenter) return undefined;
+      const result = segmenter.segment(canvas);
+      try {
+        const mask = result.categoryMask;
+        if (!mask) return undefined;
+        return {
+          width: mask.width,
+          height: mask.height,
+          categories: new Uint8Array(mask.getAsUint8Array())
+        };
+      } finally {
+        result.close();
+      }
+    })
+    .catch(() => undefined);
+  segmentationCache.set(cacheKey, pending);
+  trimCache(segmentationCache);
+  return pending;
+};
+
 export const hasPortraitGeometry = (edits: EditParams) =>
   edits.faceSlimming > 0 || edits.bodySlimming > 0 || edits.eyeEnlargement > 0;
 
+const hasPortraitRetouch = (edits: EditParams) =>
+  edits.wrinkleReduction > 0 ||
+  edits.skinToneUniformity > 0 ||
+  edits.skinSmoothing > 0 ||
+  edits.skinTone !== 0 ||
+  edits.teethWhitening > 0 ||
+  edits.clothingWrinkleReduction > 0 ||
+  (edits.makeupStyle !== "none" && edits.makeupStrength > 0);
+
 export const needsPortraitAnalysis = (edits: EditParams) =>
-  hasPortraitGeometry(edits) || edits.wrinkleReduction > 0 || edits.skinToneUniformity > 0;
+  hasPortraitGeometry(edits) || hasPortraitRetouch(edits);
 
 export const analyzePortrait = async (
   canvas: HTMLCanvasElement,
   edits: EditParams,
   cacheKey: string
 ): Promise<PortraitAnalysis> => {
-  const needsFaces = edits.faceSlimming > 0 || edits.eyeEnlargement > 0 || edits.wrinkleReduction > 0 || edits.skinToneUniformity > 0;
-  const needsPoses = edits.bodySlimming > 0;
+  const needsFaces =
+    edits.faceSlimming > 0 ||
+    edits.eyeEnlargement > 0 ||
+    edits.wrinkleReduction > 0 ||
+    edits.skinToneUniformity > 0 ||
+    edits.skinSmoothing > 0 ||
+    edits.skinTone !== 0 ||
+    edits.teethWhitening > 0 ||
+    (edits.makeupStyle !== "none" && edits.makeupStrength > 0);
+  const needsPoses = edits.bodySlimming > 0 || edits.clothingWrinkleReduction > 0;
+  const needsSegmentation = hasPortraitRetouch(edits);
   const sizedCacheKey = `${cacheKey}|${canvas.width}x${canvas.height}`;
-  const [faces, poses] = await Promise.all([
+  const [faces, poses, segmentation] = await Promise.all([
     needsFaces ? detectFaces(canvas, `face:${sizedCacheKey}`) : Promise.resolve([]),
-    needsPoses ? detectPoses(canvas, `pose:${sizedCacheKey}`) : Promise.resolve([])
+    needsPoses ? detectPoses(canvas, `pose:${sizedCacheKey}`) : Promise.resolve([]),
+    needsSegmentation ? detectSegmentation(canvas, `segment:${sizedCacheKey}`) : Promise.resolve(undefined)
   ]);
-  return { faces, poses };
+  return { faces, poses, segmentation };
 };
 
 const landmarkPoint = (landmarks: PortraitLandmark[], index: number, width: number, height: number) => {
@@ -353,4 +437,5 @@ export const applyPortraitGeometry = (imageData: ImageData, edits: EditParams, a
 export const clearPortraitAnalysisCache = () => {
   faceCache.clear();
   poseCache.clear();
+  segmentationCache.clear();
 };

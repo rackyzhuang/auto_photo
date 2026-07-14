@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   Check,
+  X,
   Download,
   Eye,
   EyeOff,
@@ -22,9 +23,10 @@ import {
   ZoomOut
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { AiSettingsState, AiTuningResult, AutoAnalysis, EditParams, HslChannel, PhotoAsset } from "../types";
+import type { AiSettingsState, AiTuningResult, AutoAnalysis, EditParams, HslChannel, MakeupStyleId, PhotoAsset } from "../types";
 import type { PlatformCapabilities } from "../platform";
 import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams, portraitBeautyQuickEdits } from "../services/editParams";
+import { getMakeupLook, getMakeupLooks, type MakeupAudience } from "../services/makeupLooks";
 import { analyzeImage, createAutoEdit, formatFileSize, importPhotoFile, renderImageSourceWithEdits } from "../services/imageProcessing";
 import { clearAiSettings, diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, saveAiSettings, tunePhotoWithAi } from "../services/desktopBridge";
 
@@ -106,6 +108,8 @@ const beautyControls: MobileEditControl[] = [
   { key: "teethWhitening", label: "美齿", min: 0, max: 100 },
   { key: "clothingWrinkleReduction", label: "衣物去褶皱", min: 0, max: 100 }
 ];
+
+const makeupStrengthControl: MobileEditControl = { key: "makeupStrength", label: "妆容强度", min: 0, max: 100 };
 
 const aiControls = [...basicControls, ...enhanceControls, ...beautyControls];
 
@@ -432,6 +436,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const [isCompareActive, setIsCompareActive] = useState(false);
   const [comparePosition, setComparePosition] = useState(50);
   const [activeTool, setActiveTool] = useState<MobileTool>("tuning");
+  const [makeupAudience, setMakeupAudience] = useState<MakeupAudience>("women");
   const [status, setStatus] = useState(`${capabilities.label} 版当前仅支持 JPG/JPEG`);
   const [isImporting, setIsImporting] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
@@ -464,6 +469,11 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   useEffect(() => {
     assetRef.current = asset;
   }, [asset]);
+
+  useEffect(() => {
+    const look = getMakeupLook(edits.makeupStyle);
+    if (look) setMakeupAudience(look.audience);
+  }, [edits.makeupStyle]);
 
   useEffect(() => {
     editsRef.current = edits;
@@ -746,6 +756,17 @@ export function MobileApp({ capabilities }: MobileAppProps) {
   const applyPortraitQuickEdit = (mode: keyof typeof portraitBeautyQuickEdits) => {
     const label = mode === "evenSkin" ? "一键统一肤色" : "一键美颜";
     applyEditsWithHistory((current) => mergeEditParams(current, portraitBeautyQuickEdits[mode]), `${label}已应用，可继续调整强度`);
+  };
+
+  const applyMakeupStyle = (style: MakeupStyleId) => {
+    const look = getMakeupLook(style);
+    applyEditsWithHistory(
+      (current) => mergeEditParams(current, {
+        makeupStyle: style,
+        makeupStrength: current.makeupStrength > 0 ? current.makeupStrength : 70
+      }),
+      look ? `已应用${look.audience === "men" ? "男士" : "女士"}妆容：${look.name}` : "妆容已清除"
+    );
   };
 
   const applyLocalAutoEdit = async () => {
@@ -1050,7 +1071,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
     setActiveTool("tuning");
   };
 
-  const renderControl = (control: MobileEditControl) => (
+  const renderControl = (control: MobileEditControl, forceDisabled = false) => (
     <label className="mobile-control" key={control.key}>
       <span>{control.label}</span>
       <input
@@ -1059,7 +1080,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
         max={control.max}
         step={control.step ?? 1}
         value={edits[control.key]}
-        disabled={!asset}
+        disabled={!asset || forceDisabled}
         onPointerDown={beginHistoryGesture}
         onPointerUp={finishHistoryGesture}
         onPointerCancel={finishHistoryGesture}
@@ -1072,7 +1093,7 @@ export function MobileApp({ capabilities }: MobileAppProps) {
         max={control.max}
         step={control.step ?? 1}
         value={Math.round(edits[control.key])}
-        disabled={!asset}
+        disabled={!asset || forceDisabled}
         onFocus={beginHistoryGesture}
         onBlur={finishHistoryGesture}
         onChange={(event) => updateEdit(control.key, Number(event.target.value), control.min, control.max)}
@@ -1329,6 +1350,44 @@ export function MobileApp({ capabilities }: MobileAppProps) {
               一键美颜
             </button>
           </div>
+          <section className="makeup-module mobile-makeup-module" aria-label="妆容">
+            <div className="makeup-module-head">
+              <span>
+                <Palette size={16} />
+                <strong>妆容</strong>
+              </span>
+              {edits.makeupStyle !== "none" && (
+                <button type="button" className="makeup-clear-button" onClick={() => applyMakeupStyle("none")}>
+                  <X size={14} />
+                  清除
+                </button>
+              )}
+            </div>
+            <div className="makeup-audience-tabs" role="tablist" aria-label="妆容分类">
+              <button type="button" role="tab" aria-selected={makeupAudience === "men"} className={makeupAudience === "men" ? "active" : undefined} onClick={() => setMakeupAudience("men")}>
+                男士
+              </button>
+              <button type="button" role="tab" aria-selected={makeupAudience === "women"} className={makeupAudience === "women" ? "active" : undefined} onClick={() => setMakeupAudience("women")}>
+                女士
+              </button>
+            </div>
+            <div className="makeup-look-grid">
+              {getMakeupLooks(makeupAudience).map((look) => (
+                <button
+                  type="button"
+                  key={look.id}
+                  className={edits.makeupStyle === look.id ? "active" : undefined}
+                  aria-pressed={edits.makeupStyle === look.id}
+                  title={look.description}
+                  onClick={() => applyMakeupStyle(look.id)}
+                >
+                  <span className="makeup-swatch" style={{ backgroundColor: look.swatch }} />
+                  <strong>{look.name}</strong>
+                </button>
+              ))}
+            </div>
+            {renderControl(makeupStrengthControl, edits.makeupStyle === "none")}
+          </section>
           {beautyControls.map((control) => renderControl(control))}
         </div>
       );

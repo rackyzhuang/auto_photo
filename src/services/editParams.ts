@@ -1,4 +1,5 @@
 import type { EditParams, HslAdjustment, HslChannel, Preset } from "../types";
+import { isMakeupStyleId } from "./makeupLooks";
 
 export const hslChannels: HslChannel[] = [
   "red",
@@ -54,24 +55,26 @@ export const createDefaultEditParams = (): EditParams => ({
   skinTone: 0,
   teethWhitening: 0,
   clothingWrinkleReduction: 0,
+  makeupStyle: "none",
+  makeupStrength: 70,
   hsl: Object.fromEntries(hslChannels.map((channel) => [channel, neutralHsl()])) as EditParams["hsl"]
 });
 
 export const portraitBeautyQuickEdits = {
   evenSkin: {
     skinProtection: 90,
-    skinToneUniformity: 62,
-    skinTone: 6
+    skinToneUniformity: 56,
+    skinTone: 4
   },
   naturalBeauty: {
     skinProtection: 92,
-    faceSlimming: 18,
-    eyeEnlargement: 12,
-    wrinkleReduction: 30,
-    skinToneUniformity: 46,
-    skinSmoothing: 34,
-    skinTone: 7,
-    teethWhitening: 14
+    faceSlimming: 14,
+    eyeEnlargement: 9,
+    wrinkleReduction: 24,
+    skinToneUniformity: 40,
+    skinSmoothing: 30,
+    skinTone: 5,
+    teethWhitening: 10
   }
 } satisfies Record<string, Partial<EditParams>>;
 
@@ -81,6 +84,11 @@ export const normalizeEditParams = (params?: Partial<EditParams>): EditParams =>
   return {
     ...defaults,
     ...(params ?? {}),
+    makeupStyle: isMakeupStyleId(params?.makeupStyle) ? params.makeupStyle : "none",
+    makeupStrength:
+      typeof params?.makeupStrength === "number" && Number.isFinite(params.makeupStrength)
+        ? Math.min(100, Math.max(0, Math.round(params.makeupStrength)))
+        : defaults.makeupStrength,
     hsl: Object.fromEntries(
       hslChannels.map((channel) => [
         channel,

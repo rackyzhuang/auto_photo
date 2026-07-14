@@ -47,6 +47,7 @@ import type {
   ExportProgress,
   ExportSettings,
   NamedProjectInfo,
+  MakeupStyleId,
   PhotoAsset,
   Preset,
   ProjectSnapshot,
@@ -56,6 +57,7 @@ import type {
   WorkflowSettings
 } from "./types";
 import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams, portraitBeautyQuickEdits } from "./services/editParams";
+import { getMakeupLook, getMakeupLooks, type MakeupAudience } from "./services/makeupLooks";
 import { cropAspectOptions, normalizeRotationDegrees } from "./services/geometry";
 import {
   analyzeImage,
@@ -150,6 +152,8 @@ const portraitControls: EditControl[] = [
   { key: "teethWhitening", label: "美齿", min: 0, max: 100 },
   { key: "clothingWrinkleReduction", label: "衣物去褶皱", min: 0, max: 100 }
 ];
+
+const makeupStrengthControl: EditControl = { key: "makeupStrength", label: "妆容强度", min: 0, max: 100 };
 
 const hslChannelLabels: Record<(typeof hslChannels)[number], string> = {
   red: "红色",
@@ -837,6 +841,7 @@ export function App() {
   const [copiedParams, setCopiedParams] = useState<EditParams>();
   const [historyByAsset, setHistoryByAsset] = useState<Record<string, EditHistory>>({});
   const [openGroups, setOpenGroups] = useState<Record<EditGroupKey, boolean>>(defaultOpenGroups);
+  const [makeupAudience, setMakeupAudience] = useState<MakeupAudience>("women");
   const [batchSelection, setBatchSelection] = useState<Set<string>>(() => new Set());
   const [exportSettings, setExportSettings] = useState<ExportSettings>(() => createDefaultExportSettings());
   const [exportProgress, setExportProgress] = useState<ExportProgress>(() => createIdleExportProgress());
@@ -1034,6 +1039,11 @@ export function App() {
   useEffect(() => {
     clearAiSuggestions();
   }, [selectedId]);
+
+  useEffect(() => {
+    const look = selectedAsset ? getMakeupLook(selectedAsset.edits.makeupStyle) : undefined;
+    if (look) setMakeupAudience(look.audience);
+  }, [selectedAsset?.edits.makeupStyle]);
 
   const getControlValue = (control: EditControl) => {
     if (!selectedAsset) return 0;
@@ -2033,6 +2043,18 @@ export function App() {
     const label = mode === "evenSkin" ? "一键统一肤色" : "一键美颜";
     commitSelectedEdits(mergeEditParams(selectedAsset.edits, portraitBeautyQuickEdits[mode]), [label]);
     setStatus(`${label}已应用，可继续调整人像参数`);
+  };
+
+  const applyMakeupStyle = (style: MakeupStyleId) => {
+    if (!selectedAsset || !selectedAssetPreviewEditable) return;
+    const look = getMakeupLook(style);
+    const next = mergeEditParams(selectedAsset.edits, {
+      makeupStyle: style,
+      makeupStrength: selectedAsset.edits.makeupStrength > 0 ? selectedAsset.edits.makeupStrength : 70
+    });
+    const label = look ? `妆容：${look.name}` : "清除妆容";
+    commitSelectedEdits(next, [label]);
+    setStatus(look ? `已应用${look.audience === "men" ? "男士" : "女士"}妆容：${look.name}` : "妆容已清除");
   };
 
   const saveCustomPreset = () => {
@@ -3909,7 +3931,7 @@ export function App() {
       .filter((group) => group.presets.length > 0);
   }, []);
 
-  const renderEditControl = (control: EditControl, summary = "已调整调色参数") => {
+  const renderEditControl = (control: EditControl, summary = "已调整调色参数", forceDisabled = false) => {
     const value = getControlValue(control);
     const roundedValue = Number.isInteger(control.step ?? 1) ? Math.round(value) : value;
 
@@ -3927,7 +3949,7 @@ export function App() {
             max={control.max}
             step={control.step ?? 1}
             value={value}
-            disabled={!selectedAssetPreviewEditable}
+            disabled={!selectedAssetPreviewEditable || forceDisabled}
             onPointerDown={beginEditDraft}
             onChange={(event) => updateControl(control, Number(event.target.value), "draft")}
             onPointerUp={() => commitEditDraft([summary])}
@@ -3941,7 +3963,7 @@ export function App() {
             max={control.max}
             step={control.step ?? 1}
             value={roundedValue}
-            disabled={!selectedAssetPreviewEditable}
+            disabled={!selectedAssetPreviewEditable || forceDisabled}
             onFocus={beginEditDraft}
             onChange={(event) => updateControl(control, Number(event.target.value), "draft")}
             onBlur={() => commitEditDraft([summary])}
@@ -4530,6 +4552,45 @@ export function App() {
                   一键美颜
                 </button>
               </div>
+              <section className="makeup-module" aria-label="妆容">
+                <div className="makeup-module-head">
+                  <span>
+                    <Palette size={16} />
+                    <strong>妆容</strong>
+                  </span>
+                  {selectedAsset.edits.makeupStyle !== "none" && (
+                    <button type="button" className="makeup-clear-button" onClick={() => applyMakeupStyle("none")} disabled={!selectedAssetPreviewEditable}>
+                      <X size={14} />
+                      清除
+                    </button>
+                  )}
+                </div>
+                <div className="makeup-audience-tabs" role="tablist" aria-label="妆容分类">
+                  <button type="button" role="tab" aria-selected={makeupAudience === "men"} className={makeupAudience === "men" ? "active" : undefined} onClick={() => setMakeupAudience("men")}>
+                    男士
+                  </button>
+                  <button type="button" role="tab" aria-selected={makeupAudience === "women"} className={makeupAudience === "women" ? "active" : undefined} onClick={() => setMakeupAudience("women")}>
+                    女士
+                  </button>
+                </div>
+                <div className="makeup-look-grid">
+                  {getMakeupLooks(makeupAudience).map((look) => (
+                    <button
+                      type="button"
+                      key={look.id}
+                      className={selectedAsset.edits.makeupStyle === look.id ? "active" : undefined}
+                      aria-pressed={selectedAsset.edits.makeupStyle === look.id}
+                      title={look.description}
+                      onClick={() => applyMakeupStyle(look.id)}
+                      disabled={!selectedAssetPreviewEditable}
+                    >
+                      <span className="makeup-swatch" style={{ backgroundColor: look.swatch }} />
+                      <strong>{look.name}</strong>
+                    </button>
+                  ))}
+                </div>
+                {renderEditControl(makeupStrengthControl, "已调整妆容强度", selectedAsset.edits.makeupStyle === "none")}
+              </section>
               <div className="controls">{portraitControls.map((control) => renderEditControl(control))}</div>
             </AccordionSection>
 

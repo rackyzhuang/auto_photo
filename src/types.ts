@@ -18,6 +18,29 @@ export interface HslAdjustment {
   luminance: number;
 }
 
+export type MakeupStyleId =
+  | "none"
+  | "men-clean"
+  | "men-business-matte"
+  | "men-warm-commute"
+  | "men-cool-clear"
+  | "men-bronze"
+  | "men-camera"
+  | "men-outdoor"
+  | "men-vintage-brown"
+  | "men-stage"
+  | "men-night-smoke"
+  | "women-nude"
+  | "women-peach"
+  | "women-coral"
+  | "women-rose"
+  | "women-classic-red"
+  | "women-plum"
+  | "women-smoky"
+  | "women-champagne"
+  | "women-dewy"
+  | "women-retro-hk";
+
 export interface EditParams {
   schemaVersion: 1;
   rotation: number;
@@ -55,6 +78,8 @@ export interface EditParams {
   skinTone: number;
   teethWhitening: number;
   clothingWrinkleReduction: number;
+  makeupStyle: MakeupStyleId;
+  makeupStrength: number;
   hsl: Record<HslChannel, HslAdjustment>;
 }
 
