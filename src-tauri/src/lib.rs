@@ -24,6 +24,61 @@ struct SavedExport {
     file_name: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobilePhotoSaveResult {
+    uri: String,
+    file_name: String,
+    album: String,
+}
+
+#[cfg(target_os = "android")]
+mod android_gallery {
+    use super::MobilePhotoSaveResult;
+    use serde::Serialize;
+    use tauri::{
+        plugin::{Builder, PluginHandle, TauriPlugin},
+        AppHandle, Manager, Runtime,
+    };
+
+    pub struct Gallery<R: Runtime>(PluginHandle<R>);
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SaveImagePayload<'a> {
+        source_path: &'a str,
+        file_name: &'a str,
+    }
+
+    pub fn init<R: Runtime>() -> TauriPlugin<R> {
+        Builder::new("gallery")
+            .setup(|app, api| {
+                let handle =
+                    api.register_android_plugin("com.autophoto.gallery", "GalleryPlugin")?;
+                app.manage(Gallery(handle));
+                Ok(())
+            })
+            .build()
+    }
+
+    pub fn save<R: Runtime>(
+        app: &AppHandle<R>,
+        source_path: &str,
+        file_name: &str,
+    ) -> Result<MobilePhotoSaveResult, String> {
+        app.state::<Gallery<R>>()
+            .0
+            .run_mobile_plugin(
+                "saveImage",
+                SaveImagePayload {
+                    source_path,
+                    file_name,
+                },
+            )
+            .map_err(|error| format!("保存到系统相册失败：{error}"))
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ProjectStoreInfo {
     path: String,
@@ -719,12 +774,7 @@ fn save_export_file(
         return Err("导出目录不存在".to_string());
     }
 
-    let (_, payload) = data_url
-        .split_once(',')
-        .ok_or_else(|| "导出图片数据格式无效".to_string())?;
-    let bytes = general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|_| "导出图片 Base64 解码失败".to_string())?;
+    let bytes = decode_export_data_url(&data_url)?;
 
     let safe_name = sanitize_file_name(&file_name);
     let output_path = resolve_export_path(&output_dir, &safe_name, &conflict_strategy)?;
@@ -748,6 +798,53 @@ fn save_export_file(
         skipped: false,
         file_name: output_file_name,
     })
+}
+
+fn decode_export_data_url(data_url: &str) -> Result<Vec<u8>, String> {
+    let (_, payload) = data_url
+        .split_once(',')
+        .ok_or_else(|| "导出图片数据格式无效".to_string())?;
+    general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| "导出图片 Base64 解码失败".to_string())
+}
+
+#[tauri::command]
+fn save_mobile_photo(
+    app: tauri::AppHandle,
+    file_name: String,
+    data_url: String,
+) -> Result<MobilePhotoSaveResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let safe_name = sanitize_file_name(&file_name);
+        let bytes = decode_export_data_url(&data_url)?;
+        let cache_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("无法访问应用缓存目录：{error}"))?
+            .join("gallery-exports");
+        fs::create_dir_all(&cache_dir).map_err(|error| format!("无法创建导出缓存目录：{error}"))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("系统时间无效：{error}"))?
+            .as_nanos();
+        let temporary_path = cache_dir.join(format!("{timestamp}-{safe_name}"));
+        fs::write(&temporary_path, bytes)
+            .map_err(|error| format!("无法创建导出缓存文件：{error}"))?;
+
+        let result =
+            android_gallery::save(&app, temporary_path.to_string_lossy().as_ref(), &safe_name);
+        let _ = fs::remove_file(temporary_path);
+        result
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, file_name, data_url);
+        Err("当前平台不支持保存到 Android 系统相册".to_string())
+    }
 }
 
 fn resolve_export_path(
@@ -2034,10 +2131,15 @@ fn get_project_store_summary(app: tauri::AppHandle) -> Result<ProjectStoreSummar
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(android_gallery::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             save_export_file,
+            save_mobile_photo,
             save_project_snapshot,
             save_named_project_snapshot,
             load_project_snapshot,

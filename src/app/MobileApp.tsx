@@ -28,7 +28,7 @@ import type { PlatformCapabilities } from "../platform";
 import { builtInPresets, createDefaultEditParams, hslChannels, mergeEditParams, normalizeEditParams, portraitBeautyQuickEdits } from "../services/editParams";
 import { getMakeupLook, getMakeupLooks, type MakeupAudience } from "../services/makeupLooks";
 import { analyzeImage, createAutoEdit, formatFileSize, importPhotoFile, renderImageSourceWithEdits } from "../services/imageProcessing";
-import { clearAiSettings, diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, saveAiSettings, tunePhotoWithAi } from "../services/desktopBridge";
+import { clearAiSettings, diagnoseAiConnection, getAiSettings, isAiRuntimeAvailable, isTauriRuntime, saveAiSettings, saveMobilePhotoToGallery, tunePhotoWithAi } from "../services/desktopBridge";
 
 interface MobileAppProps {
   capabilities: PlatformCapabilities;
@@ -799,13 +799,19 @@ export function MobileApp({ capabilities }: MobileAppProps) {
         quality: 0.92,
         orientation: asset.metadata.orientation
       });
+      const fileName = sanitizeExportName(asset.name);
+      if (capabilities.id === "android" && isTauriRuntime()) {
+        const saved = await saveMobilePhotoToGallery(fileName, dataUrl);
+        setStatus(`已保存到系统相册：Pictures/${saved.album}/${saved.fileName}`);
+        return;
+      }
       const link = document.createElement("a");
       link.href = dataUrl;
-      link.download = sanitizeExportName(asset.name);
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
       link.remove();
-      setStatus("已生成 JPG 导出文件；Android/iPhone 原生相册保存将在原生适配阶段接入");
+      setStatus("已生成 JPG 导出文件");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "JPG 导出失败");
     } finally {

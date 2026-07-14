@@ -158,6 +158,13 @@ jobs:
             npm run mobile:android:init:ci
           fi
 
+      - name: Install Android gallery integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run mobile:android:prepare
+          test -f src-tauri/gen/android/app/src/main/java/com/autophoto/gallery/GalleryPlugin.kt
+
       - name: Install AutoPhoto launcher icons into Android project
         shell: bash
         run: |

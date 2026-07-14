@@ -100,6 +100,12 @@ export interface SavedExportResult {
   fileName: string;
 }
 
+export interface MobilePhotoSaveResult {
+  uri: string;
+  fileName: string;
+  album: string;
+}
+
 export interface DesktopPhotoFile {
   name: string;
   path: string;
@@ -137,6 +143,16 @@ export const saveExportFile = async (
     fileName,
     dataUrl,
     conflictStrategy
+  });
+};
+
+export const saveMobilePhotoToGallery = async (
+  fileName: string,
+  dataUrl: string
+): Promise<MobilePhotoSaveResult> => {
+  return invoke<MobilePhotoSaveResult>("save_mobile_photo", {
+    fileName,
+    dataUrl
   });
 };
 
